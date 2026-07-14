@@ -1,0 +1,28 @@
+# Core
+python-dotenv==1.0.1
+numpy==1.26.4
+pandas==2.2.2
+polars==0.20.31
+duckdb==1.0.0
+
+# Vision / tracking (Layer 1)
+opencv-python==4.10.0.84
+ultralytics==8.2.58
+scikit-learn==1.5.1
+
+# Graph (Module A)
+networkx==3.3
+
+# Predictive tabular (Layer 4)
+xgboost==2.1.0
+
+# RAG (Module C)
+faiss-cpu==1.8.0.post1
+
+# Dataset access
+SoccerNet==0.1.55
+
+# Dev / notebooks
+jupyter==1.0.0
+matplotlib==3.9.1
+pytest==8.3.1

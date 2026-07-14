@@ -1,0 +1,35 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# Data (gitignored per CLAUDE.md section 6 — datasets are downloaded, not committed)
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# Databases (Module B state store output)
+*.db
+*.duckdb
+
+# Vector store persistence (Module C)
+.chroma/
+*.index
+
+# Reports build artifacts
+reports/paper/*.aux
+reports/paper/*.log
+reports/paper/*.out
+reports/paper/*.pdf
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Env
+.env
