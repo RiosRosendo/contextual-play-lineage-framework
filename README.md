@@ -21,9 +21,7 @@ Python 3.11, OpenCV, Ultralytics YOLOv8, PyTorch, scikit-learn, pandas/Polars, D
 
 Every layer and module runs end-to-end on a locally generated synthetic test clip, and Layer 1 has since been validated against real broadcast footage and is being incrementally deepened (starting with detection quality, then tracking).
 
-Development is logged as it happens rather than after the fact:
-- [`PROGRESS.md`](PROGRESS.md) -- a running log of what was built or changed, how, and why, entry by entry.
-- [`TODO.md`](TODO.md) -- the current per-layer/module task list, including open decisions and known limitations.
+See [`TODO.md`](TODO.md) for the current per-layer/module task list, including open decisions and known limitations.
 
 ## Running the pipeline
 
