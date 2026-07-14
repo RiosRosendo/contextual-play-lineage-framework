@@ -71,7 +71,7 @@ def _script() -> list[Actor]:
     ]
 
 
-def _pitch_background() -> np.ndarray:
+def pitch_background() -> np.ndarray:
     img = np.full((FRAME_H, FRAME_W, 3), (60, 140, 60), dtype=np.uint8)
     cv2.rectangle(img, (2, 2), (FRAME_W - 3, FRAME_H - 3), (255, 255, 255), 2)
     cv2.line(img, (FRAME_W // 2, 0), (FRAME_W // 2, FRAME_H), (255, 255, 255), 2)
@@ -90,7 +90,7 @@ def generate_synthetic_clip(out_path: str | Path) -> Path:
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     actors = _script()
-    background = _pitch_background()
+    background = pitch_background()
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(str(out_path), fourcc, FPS, (FRAME_W, FRAME_H))
