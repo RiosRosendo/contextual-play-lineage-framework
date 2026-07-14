@@ -2,10 +2,19 @@
 fine-tuned checkpoint (weights/soccersum_yolov8n_ball.pt, 2-class:
 person/ball) when present -- it noticeably improves ball recall over the
 plain COCO-pretrained model (F1 0.41 -> 0.60 on a held-out SoccerSum
-sequence; see notebooks/finetune_ball_detector.py and PROGRESS.md). Falls
-back to pretrained COCO classes (person=0, sports ball=32) if the
-fine-tuned weights aren't available, so this still works on a machine that
-hasn't run the fine-tuning script.
+sequence; see notebooks/finetune_ball_detector.py).
+
+That weight file is optional and local-only -- it is NOT committed to this
+repo and NOT distributed anywhere. SoccerSum is licensed CC BY-NC-ND
+(No-Derivatives), and a model fine-tuned on it is arguably a derivative
+work, so shipping the resulting weights publicly would be a real licensing
+risk. If you want the fine-tuned detector, download SoccerSum yourself
+(see notebooks/finetune_ball_detector.py's docstring for the Zenodo
+record) and run `python -m notebooks.finetune_ball_detector prepare` then
+`train` to regenerate it locally -- it's gitignored by `*.pt` like any
+other weight file. Without it, this module falls back cleanly to plain
+pretrained COCO classes (person=0, sports ball=32), so everything still
+works on a fresh clone with no extra setup.
 
 Neither model distinguishes players from the referee yet -- that needs
 further fine-tuning (tracked in TODO.md). Team split is delegated to

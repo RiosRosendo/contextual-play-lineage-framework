@@ -21,11 +21,15 @@ data/processed/*
 *.db
 *.duckdb
 
-# Pretrained weights (auto-downloaded by ultralytics on first run).
-# Exception: our own fine-tuned checkpoint is small (6MB) and worth
-# checking in so the repo works out of the box without a 1+ hour retrain.
+# Pretrained weights (auto-downloaded by ultralytics on first run), and
+# any locally fine-tuned checkpoint. weights/soccersum_yolov8n_ball.pt is
+# NOT committed: it's fine-tuned on SoccerSum, which is CC BY-NC-ND
+# (No-Derivatives) -- distributing a derivative model trained on it is a
+# real licensing risk for a public repo. Run
+# `python -m notebooks.finetune_ball_detector train` against your own
+# SoccerSum download to regenerate it locally; yolo_detector.py falls back
+# to plain pretrained COCO weights if the file isn't present.
 *.pt
-!weights/soccersum_yolov8n_ball.pt
 
 # Vector store persistence (Module C)
 .chroma/

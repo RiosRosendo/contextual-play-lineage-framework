@@ -15,6 +15,12 @@ Usage:
     python -m notebooks.finetune_ball_detector prepare   # build YOLO dataset
     python -m notebooks.finetune_ball_detector train     # fine-tune
     python -m notebooks.finetune_ball_detector eval       # evaluate vs held-out sequence 6114
+
+Licensing note: SoccerSum is CC BY-NC-ND (No-Derivatives). The resulting
+weights (WEIGHTS_OUT below) are a fine-tuned derivative of that data, so
+they are gitignored and must stay local-only -- do not commit or
+distribute them. src/perception/yolo_detector.py falls back to plain
+pretrained COCO weights when this file is absent.
 """
 from __future__ import annotations
 
