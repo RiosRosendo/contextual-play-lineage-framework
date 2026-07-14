@@ -41,6 +41,7 @@ polars==1.42.1
 polars-runtime-32==1.42.1
 prices==1.1.1
 psutil==7.2.2
+pyarrow==25.0.0
 pycocoevalcap==1.2
 pycocotools==2.0.11
 Pygments==2.20.0

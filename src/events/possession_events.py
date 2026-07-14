@@ -13,16 +13,49 @@ SHOT_SPEED_THRESHOLD_MPS = 12.0
 SHOT_DIST_TO_GOAL_M = 25.0
 GOAL_LINE_MARGIN_M = 2.0
 GOAL_MOUTH_Y = (30.34, 37.66)  # standard 7.32m goal width, centered on a 68m-wide pitch
+POSSESSION_DEBOUNCE_FRAMES = 3  # min consecutive frames before a nearest-player change counts
 
 
 def _goal_mouth_x(team: str) -> float:
     return GOAL_X_TEAM_A_ATTACKS if team == "team_a" else 0.0
 
 
+def _debounce_nearest_track(possession_df: pd.DataFrame, min_persist: int = POSSESSION_DEBOUNCE_FRAMES) -> pd.DataFrame:
+    """The centroid tracker (src/perception/tracker.py) fragments identities,
+    so the raw nearest-to-ball track_id can flicker for a frame or two
+    without a real possession change happening. Requires a candidate
+    track_id to persist for `min_persist` consecutive frames before it's
+    accepted -- a debounce, not a model -- so single-frame tracker noise
+    doesn't get reported as a pass/turnover event.
+    """
+    df = possession_df.reset_index(drop=True).copy()
+    confirmed_track = df.loc[0, "nearest_track_id"]
+    confirmed_team = df.loc[0, "possessing_team"]
+    candidate_track = confirmed_track
+    candidate_count = 0
+
+    out_tracks, out_teams = [], []
+    for _, row in df.iterrows():
+        if row["nearest_track_id"] == candidate_track:
+            candidate_count += 1
+        else:
+            candidate_track = row["nearest_track_id"]
+            candidate_count = 1
+        if candidate_track != confirmed_track and candidate_count >= min_persist:
+            confirmed_track, confirmed_team = candidate_track, row["possessing_team"]
+        out_tracks.append(confirmed_track)
+        out_teams.append(confirmed_team)
+
+    df["nearest_track_id"] = out_tracks
+    df["possessing_team"] = out_teams
+    return df
+
+
 def detect_possession_events(possession_df: pd.DataFrame, player_time_df: pd.DataFrame) -> list[dict]:
     events = []
     if possession_df.empty:
         return events
+    possession_df = _debounce_nearest_track(possession_df)
 
     prev_team = None
     prev_track = None

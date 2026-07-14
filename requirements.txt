@@ -3,6 +3,7 @@ python-dotenv==1.0.1
 numpy==1.26.4
 pandas==2.2.2
 polars==0.20.31
+pyarrow==17.0.0
 duckdb==1.0.0
 
 # Vision / tracking (Layer 1)
