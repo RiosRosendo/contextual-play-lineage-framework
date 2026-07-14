@@ -1,3 +1,8 @@
+# Internal working docs (kept locally for session-to-session continuity,
+# not pushed to the public repo per user instruction)
+CLAUDE.md
+PROGRESS.md
+
 # Python
 venv/
 __pycache__/
