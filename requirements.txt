@@ -1,15 +1,17 @@
 # Core
 python-dotenv==1.0.1
-numpy==1.26.4
+numpy==2.4.6
 pandas==2.2.2
 polars==0.20.31
 pyarrow==17.0.0
 duckdb==1.0.0
 
 # Vision / tracking (Layer 1)
-opencv-python==4.10.0.84
-ultralytics==8.2.58
+# opencv-python>=5 requires numpy>=2 -- keep these two in step if bumping either.
+opencv-python==5.0.0.93
+ultralytics==8.4.95
 scikit-learn==1.5.1
+scipy==1.17.1
 
 # Graph (Module A)
 networkx==3.3

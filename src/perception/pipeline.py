@@ -13,14 +13,14 @@ import cv2
 import pandas as pd
 
 from src.perception import color_detector, team_id, yolo_detector
+from src.perception.bytetrack_lite import ByteTrackLite
 from src.perception.calibration import PitchCalibrator
-from src.perception.tracker import CentroidTracker
 
 
 def _run_color_backend(video_path: str, calibrator: PitchCalibrator) -> pd.DataFrame:
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 15.0
-    tracker = CentroidTracker()
+    tracker = ByteTrackLite()
     rows = []
     frame_idx = 0
     while True:
@@ -28,17 +28,17 @@ def _run_color_backend(video_path: str, calibrator: PitchCalibrator) -> pd.DataF
         if not ok:
             break
         dets = color_detector.detect_frame(frame, frame_idx)
-        det_dicts = []
-        for d in dets:
-            x_m, y_m = calibrator.pixel_to_pitch(d.px, d.py)
-            det_dicts.append({
-                "cls": d.cls, "team": d.team_hint, "x": x_m, "y": y_m, "conf": d.conf,
-            })
+        det_dicts = [
+            {"cls": d.cls, "team": d.team_hint, "box": (d.x1, d.y1, d.x2, d.y2), "conf": d.conf}
+            for d in dets
+        ]
         tracked = tracker.update(det_dicts)
         for t in tracked:
+            cx, cy = (t["box"][0] + t["box"][2]) / 2, (t["box"][1] + t["box"][3]) / 2
+            x_m, y_m = calibrator.pixel_to_pitch(cx, cy)
             rows.append({
                 "frame": frame_idx, "time_s": frame_idx / fps, "track_id": t["track_id"],
-                "cls": t["cls"], "team": t["team"], "x": t["x"], "y": t["y"], "conf": t["conf"],
+                "cls": t["cls"], "team": t["team"], "x": x_m, "y": y_m, "conf": t["conf"],
             })
         frame_idx += 1
     cap.release()
@@ -46,9 +46,13 @@ def _run_color_backend(video_path: str, calibrator: PitchCalibrator) -> pd.DataF
 
 
 def _run_yolo_backend(video_path: str, calibrator: PitchCalibrator) -> pd.DataFrame:
+    """Detection via YOLOv8 (fine-tuned if available, see yolo_detector.py)
+    plus a two-stage IoU tracker inspired by ByteTrack (see
+    bytetrack_lite.py's docstring for why this replaces Ultralytics' own
+    ByteTrack/BoT-SORT integration -- both were buggy in this environment)."""
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-    tracker = CentroidTracker()
+    tracker = ByteTrackLite()
     rows = []
     frame_idx = 0
     while True:
@@ -66,20 +70,23 @@ def _run_yolo_backend(video_path: str, calibrator: PitchCalibrator) -> pd.DataFr
         det_dicts = []
         person_i = 0
         for b in boxes:
-            cx, cy = (b.x1 + b.x2) / 2, (b.y1 + b.y2) / 2
-            x_m, y_m = calibrator.pixel_to_pitch(cx, cy)
             if b.cls == "person":
                 team = f"team_{'a' if team_labels[person_i] == 0 else 'b'}"
                 person_i += 1
-                det_dicts.append({"cls": "player", "team": team, "x": x_m, "y": y_m, "conf": b.conf})
             else:
-                det_dicts.append({"cls": "ball", "team": None, "x": x_m, "y": y_m, "conf": b.conf})
+                team = None
+            det_dicts.append({
+                "cls": b.cls, "team": team, "box": (b.x1, b.y1, b.x2, b.y2), "conf": b.conf,
+            })
 
         tracked = tracker.update(det_dicts)
         for t in tracked:
+            cx, cy = (t["box"][0] + t["box"][2]) / 2, (t["box"][1] + t["box"][3]) / 2
+            x_m, y_m = calibrator.pixel_to_pitch(cx, cy)
             rows.append({
                 "frame": frame_idx, "time_s": frame_idx / fps, "track_id": t["track_id"],
-                "cls": t["cls"], "team": t["team"], "x": t["x"], "y": t["y"], "conf": t["conf"],
+                "cls": "player" if t["cls"] == "person" else "ball", "team": t["team"],
+                "x": x_m, "y": y_m, "conf": t["conf"],
             })
         frame_idx += 1
     cap.release()

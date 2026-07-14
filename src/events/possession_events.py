@@ -21,9 +21,9 @@ def _goal_mouth_x(team: str) -> float:
 
 
 def _debounce_nearest_track(possession_df: pd.DataFrame, min_persist: int = POSSESSION_DEBOUNCE_FRAMES) -> pd.DataFrame:
-    """The centroid tracker (src/perception/tracker.py) fragments identities,
-    so the raw nearest-to-ball track_id can flicker for a frame or two
-    without a real possession change happening. Requires a candidate
+    """Layer 1's tracker can still fragment identities on a noisy frame or
+    two, so the raw nearest-to-ball track_id can flicker without a real
+    possession change happening. Requires a candidate
     track_id to persist for `min_persist` consecutive frames before it's
     accepted -- a debounce, not a model -- so single-frame tracker noise
     doesn't get reported as a pass/turnover event.

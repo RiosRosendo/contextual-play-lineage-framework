@@ -35,7 +35,35 @@ class Detection:
     team_hint: str | None  # "team_a" | "team_b" | None
     px: float
     py: float
+    x1: float
+    y1: float
+    x2: float
+    y2: float
     conf: float = 0.9
+
+
+_DEDUP_DIST_PX = 10.0  # anti-aliasing at a circle's edge can split one blob into two adjacent contours
+
+
+def _dedupe(detections: list[Detection]) -> list[Detection]:
+    """Merges near-duplicate same-class detections (see module docstring
+    note below) by keeping the larger-area one of each close pair."""
+    kept: list[Detection] = []
+    for d in detections:
+        area = (d.x2 - d.x1) * (d.y2 - d.y1)
+        merged = False
+        for i, k in enumerate(kept):
+            if k.cls != d.cls or k.team_hint != d.team_hint:
+                continue
+            if ((k.px - d.px) ** 2 + (k.py - d.py) ** 2) ** 0.5 < _DEDUP_DIST_PX:
+                k_area = (k.x2 - k.x1) * (k.y2 - k.y1)
+                if area > k_area:
+                    kept[i] = d
+                merged = True
+                break
+        if not merged:
+            kept.append(d)
+    return kept
 
 
 def detect_frame(frame_bgr: np.ndarray, frame_idx: int) -> list[Detection]:
@@ -52,7 +80,8 @@ def detect_frame(frame_bgr: np.ndarray, frame_idx: int) -> list[Detection]:
             if m["m00"] == 0:
                 continue
             cx, cy = m["m10"] / m["m00"], m["m01"] / m["m00"]
+            x, y, w, h = cv2.boundingRect(c)
             cls = _CLASS_FOR_COLOR[color_name]
             team_hint = color_name if cls == "player" else None
-            detections.append(Detection(frame_idx, cls, team_hint, cx, cy))
-    return detections
+            detections.append(Detection(frame_idx, cls, team_hint, cx, cy, x, y, x + w, y + h))
+    return _dedupe(detections)
