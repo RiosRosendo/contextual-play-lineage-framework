@@ -1,8 +1,7 @@
-# Internal working docs (kept locally for session-to-session continuity,
-# not pushed to the public repo per user instruction)
+# Internal working doc (kept locally for session-to-session continuity,
+# not pushed to the public repo per user instruction). PROGRESS.md and
+# TODO.md are tracked and pushed -- they're the project's public dev log.
 CLAUDE.md
-PROGRESS.md
-TODO.md
 
 # Python
 venv/
