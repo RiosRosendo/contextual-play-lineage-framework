@@ -27,7 +27,7 @@ N_FRAMES = FPS * DURATION_S
 TEAM_A_COLOR_BGR = (40, 40, 220)   # red
 TEAM_B_COLOR_BGR = (220, 140, 40)  # blue
 REF_COLOR_BGR = (30, 220, 220)     # yellow
-BALL_COLOR_BGR = (240, 240, 240)   # white
+BALL_COLOR_BGR = (0, 140, 255)     # orange -- distinct from the white pitch lines
 
 PLAYER_RADIUS_PX = 7
 BALL_RADIUS_PX = 4

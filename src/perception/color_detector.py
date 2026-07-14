@@ -17,7 +17,7 @@ _COLOR_RANGES = {
     "team_a": ((0, 120, 120), (10, 255, 255)),      # red
     "team_b": ((100, 120, 100), (120, 255, 255)),   # blue
     "referee": ((25, 120, 120), (35, 255, 255)),    # yellow
-    "ball": ((0, 0, 200), (180, 40, 255)),           # near-white
+    "ball": ((11, 150, 150), (22, 255, 255)),        # orange (distinct from white pitch lines)
 }
 
 _CLASS_FOR_COLOR = {
