@@ -21,8 +21,11 @@ data/processed/*
 *.db
 *.duckdb
 
-# Pretrained weights (auto-downloaded by ultralytics on first run)
+# Pretrained weights (auto-downloaded by ultralytics on first run).
+# Exception: our own fine-tuned checkpoint is small (6MB) and worth
+# checking in so the repo works out of the box without a 1+ hour retrain.
 *.pt
+!weights/soccersum_yolov8n_ball.pt
 
 # Vector store persistence (Module C)
 .chroma/
