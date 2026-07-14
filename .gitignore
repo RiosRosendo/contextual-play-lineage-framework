@@ -21,6 +21,9 @@ data/processed/*
 *.db
 *.duckdb
 
+# Pretrained weights (auto-downloaded by ultralytics on first run)
+*.pt
+
 # Vector store persistence (Module C)
 .chroma/
 *.index
