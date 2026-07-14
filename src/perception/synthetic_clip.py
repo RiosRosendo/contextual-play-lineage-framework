@@ -57,16 +57,16 @@ def _script() -> list[Actor]:
     i.e. unflagged). Play continues in the same possession chain: A1 -> A3, who
     scores at t=8s. Module A should flag this goal for review."""
     return [
-        Actor("A1", "A", TEAM_A_COLOR_BGR, [(0, 20, 34), (3, 35, 30), (5, 45, 25), (8, 55, 20), (10, 55, 20)]),
+        Actor("A1", "A", TEAM_A_COLOR_BGR, [(0, 20, 34), (3, 35, 30), (5, 45, 30), (8, 55, 32), (10, 55, 32)]),
         Actor("A2", "A", TEAM_A_COLOR_BGR, [(0, 30, 40), (3, 42, 34), (3.3, 42.5, 34.2), (5, 40, 36), (10, 38, 36)]),
-        Actor("A3", "A", TEAM_A_COLOR_BGR, [(0, 40, 15), (5, 60, 18), (8, 95, 22), (10, 100, 22)]),
+        Actor("A3", "A", TEAM_A_COLOR_BGR, [(0, 40, 15), (5, 60, 24), (8, 95, 32), (9.5, 104, 34)]),
         Actor("B1", "B", TEAM_B_COLOR_BGR, [(0, 55, 32), (2.5, 44, 33), (3.3, 42.5, 34.2), (5, 46, 33), (10, 48, 33)]),
-        Actor("B2", "B", TEAM_B_COLOR_BGR, [(0, 70, 20), (5, 85, 22), (8, 92, 20), (10, 92, 20)]),
-        Actor("B3", "B", TEAM_B_COLOR_BGR, [(0, 90, 34), (10, 90, 34)]),
+        Actor("B2", "B", TEAM_B_COLOR_BGR, [(0, 70, 20), (5, 85, 26), (8, 92, 30), (10, 92, 30)]),
+        Actor("B3", "B", TEAM_B_COLOR_BGR, [(0, 90, 40), (10, 90, 40)]),
         Actor("REF", "ref", REF_COLOR_BGR, [(0, 30, 10), (3, 35, 12), (8, 70, 15), (10, 70, 15)]),
         Actor(
             "BALL", "ball", BALL_COLOR_BGR,
-            [(0, 30, 40), (3, 42, 34), (5, 45, 25), (6.5, 60, 18), (8, 95, 22), (10, 96, 22)],
+            [(0, 30, 40), (3, 42, 34), (5, 45, 30), (6.5, 60, 27), (8, 95, 32), (9.5, 104, 34)],
         ),
     ]
 
