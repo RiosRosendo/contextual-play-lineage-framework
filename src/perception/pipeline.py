@@ -12,9 +12,11 @@ from __future__ import annotations
 import cv2
 import pandas as pd
 
-from src.perception import color_detector, pitch_calibration_cv, team_id, yolo_detector
+from src.perception import color_detector, pitch_calibration_cv, scene_cut, team_id, yolo_detector
 from src.perception.bytetrack_lite import ByteTrackLite
 from src.perception.calibration import PitchCalibrator
+
+_SHOT_TRACK_ID_STRIDE = 100_000  # keeps track_ids globally unique across shots
 
 
 def _run_color_backend(video_path: str, calibrator: PitchCalibrator) -> pd.DataFrame:
@@ -45,17 +47,18 @@ def _run_color_backend(video_path: str, calibrator: PitchCalibrator) -> pd.DataF
     return pd.DataFrame(rows)
 
 
-def _run_yolo_backend(video_path: str, calibrator: PitchCalibrator) -> pd.DataFrame:
-    """Detection via YOLOv8 (fine-tuned if available, see yolo_detector.py)
-    plus a two-stage IoU tracker inspired by ByteTrack (see
-    bytetrack_lite.py's docstring for why this replaces Ultralytics' own
-    ByteTrack/BoT-SORT integration -- both were buggy in this environment)."""
+def _run_yolo_backend_shot(video_path: str, calibrator: PitchCalibrator, fps: float,
+                            start_frame: int, end_frame: int, track_id_offset: int) -> list[dict]:
+    """Runs detection + team ID + tracking over a single shot's frame range
+    only. A fresh tracker is used per shot -- track identity across a cut
+    is meaningless (it's a different framing, possibly a different part of
+    the pitch or a different subject entirely), so continuing the same
+    tracker across a cut would silently associate unrelated detections."""
     cap = cv2.VideoCapture(video_path)
-    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
     tracker = ByteTrackLite()
     rows = []
-    frame_idx = 0
-    while True:
+    for frame_idx in range(start_frame, end_frame):
         ok, frame = cap.read()
         if not ok:
             break
@@ -84,30 +87,54 @@ def _run_yolo_backend(video_path: str, calibrator: PitchCalibrator) -> pd.DataFr
             cx, cy = (t["box"][0] + t["box"][2]) / 2, (t["box"][1] + t["box"][3]) / 2
             x_m, y_m = calibrator.pixel_to_pitch(cx, cy)
             rows.append({
-                "frame": frame_idx, "time_s": frame_idx / fps, "track_id": t["track_id"],
+                "frame": frame_idx, "time_s": frame_idx / fps, "track_id": t["track_id"] + track_id_offset,
                 "cls": "player" if t["cls"] == "person" else "ball", "team": t["team"],
                 "x": x_m, "y": y_m, "conf": t["conf"],
             })
-        frame_idx += 1
     cap.release()
-    return pd.DataFrame(rows)
+    return rows
 
 
-def _calibrate_yolo_backend(video_path: str, frame_w: int, frame_h: int) -> PitchCalibrator:
+def _calibrate_shot(video_path: str, start_frame: int, frame_w: int, frame_h: int) -> PitchCalibrator:
     """Tries real keypoint-based calibration (pitch_calibration_cv.py) on
-    the first frame; a single camera is assumed for the whole clip, so one
-    calibration is computed and reused throughout. Falls back to the flat
-    placeholder if no pitch keypoints are confidently detected."""
+    a shot's first frame. Falls back to the flat placeholder if no pitch
+    keypoints are confidently detected."""
     cap = cv2.VideoCapture(video_path)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
     ok, frame = cap.read()
     cap.release()
     if ok:
-        boxes = yolo_detector.detect_frame(frame, 0)
+        boxes = yolo_detector.detect_frame(frame, start_frame)
         person_boxes = [(b.x1, b.y1, b.x2, b.y2) for b in boxes if b.cls == "person"]
         calib = pitch_calibration_cv.calibrate_frame(frame, person_boxes)
         if calib is not None:
             return calib
     return PitchCalibrator.placeholder_for_frame_size(frame_w, frame_h)
+
+
+def _run_yolo_backend(video_path: str, frame_w: int, frame_h: int) -> pd.DataFrame:
+    """Detection via YOLOv8 (fine-tuned if available, see yolo_detector.py)
+    plus a two-stage IoU tracker inspired by ByteTrack (see
+    bytetrack_lite.py's docstring for why this replaces Ultralytics' own
+    ByteTrack/BoT-SORT integration -- both were buggy in this environment).
+
+    Splits the video into shots first (scene_cut.py) -- real broadcast
+    footage cuts between camera angles within seconds, and both
+    calibration (one homography per clip) and tracking (identities
+    assumed continuous) silently produce nonsense across a cut otherwise.
+    Each shot gets its own calibration and a fresh tracker."""
+    cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    cap.release()
+
+    shots = scene_cut.split_into_shots(video_path)
+    rows = []
+    for shot_i, (start_frame, end_frame) in enumerate(shots):
+        calibrator = _calibrate_shot(video_path, start_frame, frame_w, frame_h)
+        rows.extend(_run_yolo_backend_shot(
+            video_path, calibrator, fps, start_frame, end_frame, shot_i * _SHOT_TRACK_ID_STRIDE,
+        ))
+    return pd.DataFrame(rows)
 
 
 def run_perception(video_path: str, backend: str = "color") -> pd.DataFrame:
@@ -121,8 +148,7 @@ def run_perception(video_path: str, backend: str = "color") -> pd.DataFrame:
         calibrator = PitchCalibrator.identity_scale(PX_PER_M)
         return _run_color_backend(video_path, calibrator)
     elif backend == "yolo":
-        calibrator = _calibrate_yolo_backend(video_path, frame_w, frame_h)
-        return _run_yolo_backend(video_path, calibrator)
+        return _run_yolo_backend(video_path, frame_w, frame_h)
     else:
         raise ValueError(f"Unknown backend: {backend!r}")
 
