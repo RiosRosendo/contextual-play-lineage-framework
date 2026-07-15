@@ -49,7 +49,7 @@ def _run_color_backend(video_path: str, calibrator: PitchCalibrator) -> pd.DataF
 
 def _run_yolo_backend_shot(video_path: str, calibrator: PitchCalibrator, fps: float,
                             start_frame: int, end_frame: int, track_id_offset: int,
-                            team_anchor: team_id.TeamColorAnchor) -> list[dict]:
+                            team_anchor: team_id.TeamColorAnchor, calib_source: str) -> list[dict]:
     """Runs detection + team ID + tracking over a single shot's frame range
     only. A fresh tracker is used per shot -- track identity across a cut
     is meaningless (it's a different framing, possibly a different part of
@@ -95,27 +95,27 @@ def _run_yolo_backend_shot(video_path: str, calibrator: PitchCalibrator, fps: fl
             rows.append({
                 "frame": frame_idx, "time_s": frame_idx / fps, "track_id": t["track_id"] + track_id_offset,
                 "cls": "player" if t["cls"] == "person" else "ball", "team": t["team"],
-                "x": x_m, "y": y_m, "conf": t["conf"],
+                "x": x_m, "y": y_m, "conf": t["conf"], "calib_source": calib_source,
             })
     cap.release()
     return rows
 
 
-def _calibrate_shot(video_path: str, start_frame: int, frame_w: int, frame_h: int) -> PitchCalibrator:
-    """Tries real keypoint-based calibration (pitch_calibration_cv.py) on
-    a shot's first frame. Falls back to the flat placeholder if no pitch
-    keypoints are confidently detected."""
+def _calibrate_shot_own(video_path: str, start_frame: int) -> PitchCalibrator | None:
+    """Tries real keypoint-based calibration (pitch_calibration_cv.py) on a
+    shot's first frame. Returns None if no pitch keypoints are confidently
+    detected -- the caller decides the fallback (nearest preceding shot's
+    calibration, or the flat placeholder as a last resort); see
+    `_run_yolo_backend`."""
     cap = cv2.VideoCapture(video_path)
     cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
     ok, frame = cap.read()
     cap.release()
-    if ok:
-        boxes = yolo_detector.detect_frame(frame, start_frame)
-        person_boxes = [(b.x1, b.y1, b.x2, b.y2) for b in boxes if b.cls == "person"]
-        calib = pitch_calibration_cv.calibrate_frame(frame, person_boxes)
-        if calib is not None:
-            return calib
-    return PitchCalibrator.placeholder_for_frame_size(frame_w, frame_h)
+    if not ok:
+        return None
+    boxes = yolo_detector.detect_frame(frame, start_frame)
+    person_boxes = [(b.x1, b.y1, b.x2, b.y2) for b in boxes if b.cls == "person"]
+    return pitch_calibration_cv.calibrate_frame(frame, person_boxes)
 
 
 def _run_yolo_backend(video_path: str, frame_w: int, frame_h: int) -> pd.DataFrame:
@@ -128,21 +128,42 @@ def _run_yolo_backend(video_path: str, frame_w: int, frame_h: int) -> pd.DataFra
     footage cuts between camera angles within seconds, and both
     calibration (one homography per clip) and tracking (identities
     assumed continuous) silently produce nonsense across a cut otherwise.
-    Each shot gets its own calibration and a fresh tracker -- but team
-    identity (TeamColorAnchor) is deliberately shared across all shots, so
-    "team_a" keeps meaning the same real jersey color for the whole clip."""
+    Each shot gets its own calibration attempt and a fresh tracker -- but
+    team identity (TeamColorAnchor) is deliberately shared across all
+    shots, so "team_a" keeps meaning the same real jersey color for the
+    whole clip.
+
+    Calibration fallback chain, per shot: (1) the shot's own keypoint
+    detection (pitch_calibration_cv.py); (2) if that fails -- expected
+    often on short ~100-frame shots, which rarely give the keypoint
+    detector enough frames/context to lock on -- reuse the nearest
+    *preceding* shot's calibration, since consecutive broadcast shots
+    frequently share the same camera framing (e.g. a cut to a close-up
+    and back); (3) only if no preceding shot has calibrated yet (e.g. the
+    very first shot) fall back to the flat placeholder. Each row records
+    which tier produced its calibration (`calib_source`) so this can be
+    audited after the fact."""
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     cap.release()
 
     shots = scene_cut.split_into_shots(video_path)
     team_anchor = team_id.TeamColorAnchor()
+    last_valid_calibrator: PitchCalibrator | None = None
     rows = []
     for shot_i, (start_frame, end_frame) in enumerate(shots):
-        calibrator = _calibrate_shot(video_path, start_frame, frame_w, frame_h)
+        own_calibrator = _calibrate_shot_own(video_path, start_frame)
+        if own_calibrator is not None:
+            calibrator, calib_source = own_calibrator, "own"
+            last_valid_calibrator = own_calibrator
+        elif last_valid_calibrator is not None:
+            calibrator, calib_source = last_valid_calibrator, "fallback_prev_shot"
+        else:
+            calibrator = PitchCalibrator.placeholder_for_frame_size(frame_w, frame_h)
+            calib_source = "placeholder"
         rows.extend(_run_yolo_backend_shot(
             video_path, calibrator, fps, start_frame, end_frame, shot_i * _SHOT_TRACK_ID_STRIDE,
-            team_anchor,
+            team_anchor, calib_source,
         ))
     return pd.DataFrame(rows)
 
