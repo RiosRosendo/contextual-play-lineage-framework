@@ -15,10 +15,11 @@ from src.predictive.pipeline import run_predictive
 from src.state_store.store import MatchStateStore
 
 
-def run_pipeline(video_path: str = "data/raw/synthetic_match_clip.mp4", backend: str = "color") -> dict:
+def run_pipeline(video_path: str = "data/raw/synthetic_match_clip.mp4", backend: str = "color",
+                  external_goal_events: list[dict] | None = None) -> dict:
     perception_df = run_perception(video_path, backend=backend)
     metrics = run_metrics(perception_df)
-    events = run_events(metrics)
+    events = run_events(metrics, external_goal_events=external_goal_events)
     predictive = run_predictive(metrics, events)
     enriched_events = predictive["events"]
 

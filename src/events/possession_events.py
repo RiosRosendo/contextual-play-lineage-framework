@@ -97,6 +97,23 @@ def detect_possession_events(possession_df: pd.DataFrame, player_time_df: pd.Dat
     return sorted(events, key=lambda e: e["time_s"])
 
 
+def official_goal_event(time_s: float, team: str | None = None) -> dict:
+    """Builds a goal event from an external authoritative source (e.g. a
+    match's own official goal timestamp, SoccerNet's Labels.json in this
+    project) instead of `detect_goal_events`'s ball-position-crossing
+    heuristic. Same schema (plus a `source` tag), so Module A's lineage
+    graph treats it identically -- see PROGRESS.md for why this exists:
+    goal-line geometry depends on calibration succeeding during exactly a
+    goal's own choppiest broadcast seconds, which isn't itself the thing
+    Module A's backward-search logic is trying to validate. `team` here is
+    whatever the external source encodes (e.g. "home"/"away") -- it is
+    NOT guaranteed to match this pipeline's internal `team_a`/`team_b`
+    labels, which are assigned arbitrarily per clip by `TeamColorAnchor`;
+    `find_review_alerts` doesn't depend on this field matching, only
+    `location` and `team` are used for display/explanation."""
+    return {"type": "goal", "time_s": time_s, "team": team, "location": None, "source": "official_label"}
+
+
 def detect_goal_events(player_time_df: pd.DataFrame) -> list[dict]:
     """A "goal" is the ball crossing within GOAL_LINE_MARGIN_M of either goal
     line, inside the goal mouth's y-range. Deliberately simple -- CLAUDE.md

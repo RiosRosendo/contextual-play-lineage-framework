@@ -9,13 +9,20 @@ from src.events.foul_detector.detect import run_foul_detection
 from src.events.possession_events import detect_goal_events, detect_possession_events
 
 
-def run_events(metrics_result: dict) -> list[dict]:
+def run_events(metrics_result: dict, external_goal_events: list[dict] | None = None) -> list[dict]:
+    """`external_goal_events`, when given, replaces `detect_goal_events`'s
+    own ball-position-crossing heuristic as the source of "goal" events --
+    e.g. a match's official goal timestamp (see
+    `possession_events.official_goal_event`), which doesn't depend on
+    calibration succeeding around the goal moment the way the heuristic
+    does. The heuristic remains the default/fallback for footage with no
+    external goal source."""
     player_time_df = metrics_result["player_time_df"]
     possession_df = metrics_result["possession_df"]
 
     events = []
     events += detect_possession_events(possession_df, player_time_df)
-    events += detect_goal_events(player_time_df)
+    events += external_goal_events if external_goal_events else detect_goal_events(player_time_df)
     events += run_foul_detection(player_time_df)
     return sorted(events, key=lambda e: e["time_s"])
 
