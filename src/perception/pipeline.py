@@ -96,6 +96,7 @@ def _run_yolo_backend_shot(video_path: str, calibrator: PitchCalibrator, fps: fl
                 "frame": frame_idx, "time_s": frame_idx / fps, "track_id": t["track_id"] + track_id_offset,
                 "cls": "player" if t["cls"] == "person" else "ball", "team": t["team"],
                 "x": x_m, "y": y_m, "conf": t["conf"], "calib_source": calib_source,
+                "box_x1": t["box"][0], "box_y1": t["box"][1], "box_x2": t["box"][2], "box_y2": t["box"][3],
             })
     cap.release()
     return rows

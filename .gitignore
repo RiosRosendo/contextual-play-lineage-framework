@@ -17,6 +17,14 @@ data/processed/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 
+# Demo videos rendered directly over real broadcast footage (overlay
+# boxes/labels on top of the actual video frames) carry the same
+# redistribution licensing risk as the raw clips they're rendered from --
+# see the "SoccerNet footage isn't licensed for redistribution either"
+# note in the dev log. Kept locally only, unlike pipeline_demo.mp4, which
+# is drawn on a fully synthetic pitch background and has no such issue.
+reports/figures/soccernet_demo.mp4
+
 # Databases (Module B state store output)
 *.db
 *.duckdb
