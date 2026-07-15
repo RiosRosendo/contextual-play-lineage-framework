@@ -48,12 +48,18 @@ def _run_color_backend(video_path: str, calibrator: PitchCalibrator) -> pd.DataF
 
 
 def _run_yolo_backend_shot(video_path: str, calibrator: PitchCalibrator, fps: float,
-                            start_frame: int, end_frame: int, track_id_offset: int) -> list[dict]:
+                            start_frame: int, end_frame: int, track_id_offset: int,
+                            team_anchor: team_id.TeamColorAnchor) -> list[dict]:
     """Runs detection + team ID + tracking over a single shot's frame range
     only. A fresh tracker is used per shot -- track identity across a cut
     is meaningless (it's a different framing, possibly a different part of
     the pitch or a different subject entirely), so continuing the same
-    tracker across a cut would silently associate unrelated detections."""
+    tracker across a cut would silently associate unrelated detections.
+
+    Team identity (`team_anchor`) is the opposite: it's passed in from the
+    caller and shared across every shot in the clip, not recreated here --
+    see TeamColorAnchor's docstring for why re-clustering blind per shot
+    (or per frame) is the bug it fixes."""
     cap = cv2.VideoCapture(video_path)
     cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
     tracker = ByteTrackLite()
@@ -68,7 +74,7 @@ def _run_yolo_backend_shot(video_path: str, calibrator: PitchCalibrator, fps: fl
             if b.cls == "person":
                 torso_colors.append(team_id.torso_crop_mean_color(frame, b.x1, b.y1, b.x2, b.y2))
                 person_boxes.append(b)
-        team_labels = team_id.assign_teams(torso_colors) if torso_colors else []
+        team_labels = team_anchor.assign(torso_colors) if torso_colors else []
 
         det_dicts = []
         person_i = 0
@@ -122,17 +128,21 @@ def _run_yolo_backend(video_path: str, frame_w: int, frame_h: int) -> pd.DataFra
     footage cuts between camera angles within seconds, and both
     calibration (one homography per clip) and tracking (identities
     assumed continuous) silently produce nonsense across a cut otherwise.
-    Each shot gets its own calibration and a fresh tracker."""
+    Each shot gets its own calibration and a fresh tracker -- but team
+    identity (TeamColorAnchor) is deliberately shared across all shots, so
+    "team_a" keeps meaning the same real jersey color for the whole clip."""
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     cap.release()
 
     shots = scene_cut.split_into_shots(video_path)
+    team_anchor = team_id.TeamColorAnchor()
     rows = []
     for shot_i, (start_frame, end_frame) in enumerate(shots):
         calibrator = _calibrate_shot(video_path, start_frame, frame_w, frame_h)
         rows.extend(_run_yolo_backend_shot(
             video_path, calibrator, fps, start_frame, end_frame, shot_i * _SHOT_TRACK_ID_STRIDE,
+            team_anchor,
         ))
     return pd.DataFrame(rows)
 

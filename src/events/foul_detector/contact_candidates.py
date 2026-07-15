@@ -10,6 +10,16 @@ import pandas as pd
 
 CONTACT_DIST_M = 1.5
 MIN_CLOSING_SPEED_MPS = 3.0
+# Elite sprint speed tops out around 10-12 m/s (Usain Bolt's peak is ~12.4
+# m/s); this is the SUM of both players' individual speeds, so even a rare
+# head-on full-sprint collision shouldn't clear much past that. Real-footage
+# validation (Sunderland vs Liverpool, see PROGRESS.md) found "closing
+# speeds" of 16-46 m/s coming out of the tracker on a heavily cut-up clip --
+# physically impossible for real contact, and a strong signal that a
+# tracking-ID switch (not a genuine collision) produced the position jump
+# that this heuristic misreads as speed. Filtered out here rather than left
+# for the (untrained, illustrative-only) classifier to sort out downstream.
+MAX_CLOSING_SPEED_MPS = 12.0
 MIN_GAP_S = 1.0  # avoid re-flagging the same contact on consecutive frames
 
 
@@ -29,7 +39,7 @@ def find_contact_candidates(player_time_df: pd.DataFrame) -> list[dict]:
                 if dist > CONTACT_DIST_M:
                     continue
                 closing_speed = a.get("speed_mps", 0.0) + b.get("speed_mps", 0.0)
-                if closing_speed < MIN_CLOSING_SPEED_MPS:
+                if closing_speed < MIN_CLOSING_SPEED_MPS or closing_speed > MAX_CLOSING_SPEED_MPS:
                     continue
                 pair_key = tuple(sorted((a["track_id"], b["track_id"])))
                 t = a["time_s"]
