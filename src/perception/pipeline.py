@@ -12,7 +12,7 @@ from __future__ import annotations
 import cv2
 import pandas as pd
 
-from src.perception import color_detector, team_id, yolo_detector
+from src.perception import color_detector, pitch_calibration_cv, team_id, yolo_detector
 from src.perception.bytetrack_lite import ByteTrackLite
 from src.perception.calibration import PitchCalibrator
 
@@ -93,6 +93,23 @@ def _run_yolo_backend(video_path: str, calibrator: PitchCalibrator) -> pd.DataFr
     return pd.DataFrame(rows)
 
 
+def _calibrate_yolo_backend(video_path: str, frame_w: int, frame_h: int) -> PitchCalibrator:
+    """Tries real keypoint-based calibration (pitch_calibration_cv.py) on
+    the first frame; a single camera is assumed for the whole clip, so one
+    calibration is computed and reused throughout. Falls back to the flat
+    placeholder if no pitch keypoints are confidently detected."""
+    cap = cv2.VideoCapture(video_path)
+    ok, frame = cap.read()
+    cap.release()
+    if ok:
+        boxes = yolo_detector.detect_frame(frame, 0)
+        person_boxes = [(b.x1, b.y1, b.x2, b.y2) for b in boxes if b.cls == "person"]
+        calib = pitch_calibration_cv.calibrate_frame(frame, person_boxes)
+        if calib is not None:
+            return calib
+    return PitchCalibrator.placeholder_for_frame_size(frame_w, frame_h)
+
+
 def run_perception(video_path: str, backend: str = "color") -> pd.DataFrame:
     cap = cv2.VideoCapture(video_path)
     frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -104,7 +121,7 @@ def run_perception(video_path: str, backend: str = "color") -> pd.DataFrame:
         calibrator = PitchCalibrator.identity_scale(PX_PER_M)
         return _run_color_backend(video_path, calibrator)
     elif backend == "yolo":
-        calibrator = PitchCalibrator.placeholder_for_frame_size(frame_w, frame_h)
+        calibrator = _calibrate_yolo_backend(video_path, frame_w, frame_h)
         return _run_yolo_backend(video_path, calibrator)
     else:
         raise ValueError(f"Unknown backend: {backend!r}")
