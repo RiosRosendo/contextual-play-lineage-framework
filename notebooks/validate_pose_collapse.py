@@ -39,6 +39,8 @@ JOBS = [
      "real_foul_time_s": None, "note": "real moment not independently pinned down"},
     {"slug": "palace_arsenal", "path": "data/raw/soccernet/card_palace_arsenal.mp4",
      "real_foul_time_s": None, "note": "had 8 distance/speed candidates already, none near its card"},
+    {"slug": "sunderland_liverpool", "path": "data/raw/soccernet/foul_before_goal_clip.mp4",
+     "real_foul_time_s": None, "note": "regression check -- 31 distance/speed candidates already, 100s clip"},
 ]
 
 NEAR_WINDOW_S = 3.0
