@@ -49,7 +49,8 @@ def _run_color_backend(video_path: str, calibrator: PitchCalibrator) -> pd.DataF
 
 def _run_yolo_backend_shot(video_path: str, calibrator: PitchCalibrator, fps: float,
                             start_frame: int, end_frame: int, track_id_offset: int,
-                            team_anchor: team_id.TeamColorAnchor, calib_source: str) -> list[dict]:
+                            team_anchor: team_id.TeamColorAnchor, calib_source: str,
+                            processed_so_far: int, total_frames: int) -> tuple[list[dict], int]:
     """Runs detection + team ID + tracking over a single shot's frame range
     only. A fresh tracker is used per shot -- track identity across a cut
     is meaningless (it's a different framing, possibly a different part of
@@ -59,11 +60,17 @@ def _run_yolo_backend_shot(video_path: str, calibrator: PitchCalibrator, fps: fl
     Team identity (`team_anchor`) is the opposite: it's passed in from the
     caller and shared across every shot in the clip, not recreated here --
     see TeamColorAnchor's docstring for why re-clustering blind per shot
-    (or per frame) is the bug it fixes."""
+    (or per frame) is the bug it fixes.
+
+    `processed_so_far`/`total_frames` are only for the periodic progress
+    print -- YOLO detection per frame is the slow part of this pipeline
+    (visible as a long silent pause otherwise), so this prints every 100
+    frames across the whole clip, not just this shot."""
     cap = cv2.VideoCapture(video_path)
     cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
     tracker = ByteTrackLite()
     rows = []
+    processed = processed_so_far
     for frame_idx in range(start_frame, end_frame):
         ok, frame = cap.read()
         if not ok:
@@ -98,8 +105,13 @@ def _run_yolo_backend_shot(video_path: str, calibrator: PitchCalibrator, fps: fl
                 "x": x_m, "y": y_m, "conf": t["conf"], "calib_source": calib_source,
                 "box_x1": t["box"][0], "box_y1": t["box"][1], "box_x2": t["box"][2], "box_y2": t["box"][3],
             })
+
+        processed += 1
+        if processed % 100 == 0 or processed == total_frames:
+            pct = 100 * processed / total_frames if total_frames else 0
+            print(f"  perception: {processed}/{total_frames} frames ({pct:.0f}%)")
     cap.release()
-    return rows
+    return rows, processed
 
 
 def _calibrate_shot_own(video_path: str, start_frame: int) -> PitchCalibrator | None:
@@ -146,13 +158,17 @@ def _run_yolo_backend(video_path: str, frame_w: int, frame_h: int) -> pd.DataFra
     audited after the fact."""
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     cap.release()
 
     shots = scene_cut.split_into_shots(video_path)
+    print(f"Perception (yolo backend): {total_frames} frames across {len(shots)} shot(s)...")
     team_anchor = team_id.TeamColorAnchor()
     last_valid_calibrator: PitchCalibrator | None = None
     rows = []
+    processed = 0
     for shot_i, (start_frame, end_frame) in enumerate(shots):
+        print(f"Shot {shot_i + 1}/{len(shots)} (frames {start_frame}-{end_frame})...")
         own_calibrator = _calibrate_shot_own(video_path, start_frame)
         if own_calibrator is not None:
             calibrator, calib_source = own_calibrator, "own"
@@ -162,10 +178,12 @@ def _run_yolo_backend(video_path: str, frame_w: int, frame_h: int) -> pd.DataFra
         else:
             calibrator = PitchCalibrator.placeholder_for_frame_size(frame_w, frame_h)
             calib_source = "placeholder"
-        rows.extend(_run_yolo_backend_shot(
+        shot_rows, processed = _run_yolo_backend_shot(
             video_path, calibrator, fps, start_frame, end_frame, shot_i * _SHOT_TRACK_ID_STRIDE,
-            team_anchor, calib_source,
-        ))
+            team_anchor, calib_source, processed, total_frames,
+        )
+        rows.extend(shot_rows)
+    print(f"Perception (yolo backend) done: {processed}/{total_frames} frames processed.")
     return pd.DataFrame(rows)
 
 

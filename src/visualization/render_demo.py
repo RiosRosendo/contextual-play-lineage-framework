@@ -55,6 +55,13 @@ HEATMAP_INSET_W, HEATMAP_INSET_H = 210, 140
 PITCH_LENGTH_M, PITCH_WIDTH_M = 105.0, 68.0
 
 
+def _print_render_progress(frame_idx: int, n_frames: int) -> None:
+    step = max(1, n_frames // 10)
+    if (frame_idx + 1) % step == 0 or frame_idx + 1 == n_frames:
+        pct = 100 * (frame_idx + 1) / n_frames if n_frames else 0
+        print(f"  rendering: {frame_idx + 1}/{n_frames} frames ({pct:.0f}%)")
+
+
 def _color_for(cls: str, team: str | None) -> tuple:
     if cls == "ball":
         return BALL_COLOR_BGR
@@ -94,6 +101,7 @@ def _render_synthetic_birdseye(video_path: str, out_path: Path) -> Path:
     writer = cv2.VideoWriter(str(out_path), fourcc, FPS, (FRAME_W, FRAME_H))
 
     n_frames = int(df["frame"].max()) + 1
+    print(f"Rendering synthetic bird's-eye demo: {n_frames} frames...")
     for frame_idx in range(n_frames):
         frame = background.copy()
         t_s = frame_idx / FPS
@@ -105,7 +113,9 @@ def _render_synthetic_birdseye(video_path: str, out_path: Path) -> Path:
 
         _draw_events_and_alert(frame, t_s, events, alert_time_s, FRAME_W, FRAME_H)
         writer.write(frame)
+        _print_render_progress(frame_idx, n_frames)
     writer.release()
+    print(f"Wrote {n_frames} frames to {out_path}")
     return out_path
 
 
@@ -150,6 +160,8 @@ def _render_real_overlay(video_path: str, out_path: Path, result: dict | None = 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(str(out_path), fourcc, fps, (frame_w, frame_h))
 
+    n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    print(f"Rendering real-footage overlay demo: {n_frames} frames...")
     by_frame = {frame_idx: rows for frame_idx, rows in df.groupby("frame")}
     last_cut_frame = None
     frame_idx = 0
@@ -188,9 +200,11 @@ def _render_real_overlay(video_path: str, out_path: Path, result: dict | None = 
         frame[10:10 + ih, frame_w - 10 - iw:frame_w - 10] = inset
 
         writer.write(frame)
+        _print_render_progress(frame_idx, n_frames)
         frame_idx += 1
     cap.release()
     writer.release()
+    print(f"Wrote {frame_idx} frames to {out_path}")
     return out_path
 
 

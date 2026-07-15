@@ -38,6 +38,7 @@ _using_fine_tuned = False
 def _get_model():
     global _model, _using_fine_tuned
     if _model is None:
+        print("Loading YOLO model (first call only -- torch/ultralytics startup can take a while)...")
         from ultralytics import YOLO
         if _FINE_TUNED_WEIGHTS.exists():
             _model = YOLO(str(_FINE_TUNED_WEIGHTS))
@@ -45,6 +46,7 @@ def _get_model():
         else:
             _model = YOLO("yolov8n.pt")
             _using_fine_tuned = False
+        print(f"Loaded YOLO model (fine_tuned={_using_fine_tuned}).")
     return _model
 
 
