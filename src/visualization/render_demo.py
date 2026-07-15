@@ -69,6 +69,8 @@ def _draw_events_and_alert(frame: np.ndarray, t_s: float, events: list[dict],
     for e in events:
         if e["time_s"] <= t_s <= e["time_s"] + EVENT_DISPLAY_S:
             label = _EVENT_LABEL.get(e["type"], e["type"].upper())
+            if e["type"] == "foul" and e.get("triggers"):
+                label += f" [{'+'.join(e['triggers'])}]"
             color = _EVENT_COLOR.get(e["type"], (255, 255, 255))
             cv2.putText(frame, f"{label}  t={e['time_s']:.1f}s", (10, y_offset),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2, cv2.LINE_AA)
@@ -126,8 +128,9 @@ def _heatmap_inset(team_bins: dict[str, np.ndarray]) -> np.ndarray:
     return inset
 
 
-def _render_real_overlay(video_path: str, out_path: Path) -> Path:
-    result = run_pipeline(video_path, backend="yolo")
+def _render_real_overlay(video_path: str, out_path: Path, result: dict | None = None) -> Path:
+    if result is None:
+        result = run_pipeline(video_path, backend="yolo")
     df = result["metrics"]["player_time_df"]
     events = result["events"]
     alerts = result["review_alerts"]
@@ -191,7 +194,12 @@ def _render_real_overlay(video_path: str, out_path: Path) -> Path:
     return out_path
 
 
-def render_demo(video_path: str = SYNTHETIC_CLIP_PATH, out_path: str | None = None) -> Path:
+def render_demo(video_path: str = SYNTHETIC_CLIP_PATH, out_path: str | None = None,
+                 result: dict | None = None) -> Path:
+    """`result`, if given, must be a prior `run_pipeline(video_path, backend="yolo")`
+    return value -- lets a caller inspect events/alerts (e.g. to print a
+    summary) without paying for a second full pipeline run just to render
+    the video from the same data. Ignored for the synthetic clip."""
     if out_path is None:
         out_path = "reports/figures/pipeline_demo.mp4" if video_path == SYNTHETIC_CLIP_PATH \
             else f"reports/figures/{Path(video_path).stem}_demo.mp4"
@@ -200,7 +208,7 @@ def render_demo(video_path: str = SYNTHETIC_CLIP_PATH, out_path: str | None = No
 
     if video_path == SYNTHETIC_CLIP_PATH:
         return _render_synthetic_birdseye(video_path, out_path)
-    return _render_real_overlay(video_path, out_path)
+    return _render_real_overlay(video_path, out_path, result=result)
 
 
 if __name__ == "__main__":
