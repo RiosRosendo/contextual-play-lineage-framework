@@ -76,18 +76,19 @@ def _run_yolo_backend_shot(video_path: str, calibrator: PitchCalibrator, fps: fl
         if not ok:
             break
         boxes = yolo_detector.detect_frame(frame, frame_idx)
-        torso_colors, person_boxes = [], []
+        torso_colors, person_box_tuples = [], []
         for b in boxes:
             if b.cls == "person":
                 torso_colors.append(team_id.torso_crop_mean_color(frame, b.x1, b.y1, b.x2, b.y2))
-                person_boxes.append(b)
-        team_labels = team_anchor.assign(torso_colors) if torso_colors else []
+                person_box_tuples.append((b.x1, b.y1, b.x2, b.y2))
+        team_labels = team_anchor.assign(torso_colors, person_box_tuples) if torso_colors else []
 
         det_dicts = []
         person_i = 0
         for b in boxes:
             if b.cls == "person":
-                team = f"team_{'a' if team_labels[person_i] == 0 else 'b'}"
+                label = team_labels[person_i]
+                team = None if label is None else f"team_{'a' if label == 0 else 'b'}"
                 person_i += 1
             else:
                 team = None

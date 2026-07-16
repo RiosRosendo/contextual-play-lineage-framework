@@ -43,6 +43,16 @@ def assign_teams(torso_colors: list[np.ndarray]) -> list[int]:
     return labels.tolist()
 
 
+def _iou(a: tuple, b: tuple) -> float:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    union = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
+    return inter / union if union > 0 else 0.0
+
+
 class TeamColorAnchor:
     """Persists team-color identity across frames and shots: "team_a"
     keeps meaning the same real jersey color throughout a whole clip,
@@ -54,31 +64,78 @@ class TeamColorAnchor:
     Deliberately does NOT reset on a scene cut -- that's the point: the
     caller creates one instance for a whole clip and keeps using it across
     shots, which is what actually fixes the bug described in
-    `assign_teams`'s docstring."""
+    `assign_teams`'s docstring.
 
-    def __init__(self, ema_alpha: float = 0.05):
+    Real-footage validation (PROGRESS.md, 2026-07-15) found a second bug
+    this class needs to guard against: when two players' boxes overlap
+    (occlusion, a tangle, a tackle), the torso crop can pick up a blend of
+    both players' colors, producing an ambiguous sample that still gets
+    confidently assigned to *some* team and then folds into that team's
+    running centroid via the EMA update -- observed directly to flip a
+    single track's reported team mid-life (e.g. "team_a" on one frame,
+    "team_b" on the very next, same real player). A sample is now treated
+    as untrustworthy -- classified as `None` (no team) rather than forced
+    to a guess, and excluded from the centroid update -- if either: (1) it
+    isn't clearly closer to one reference centroid than the other (a
+    minimum-separation ratio), or (2) its box significantly overlaps
+    another detected player's box this frame (occlusion). `None` is
+    already a valid, handled value for `team` everywhere downstream (ball
+    and referee rows already carry it), so an honest "don't know" for one
+    frame is a normal case, not a new failure mode for callers to handle."""
+
+    def __init__(self, ema_alpha: float = 0.05, min_separation_ratio: float = 1.2,
+                 overlap_iou_threshold: float = 0.1):
         self.centroids: np.ndarray | None = None  # shape (2, 3), BGR
         self.ema_alpha = ema_alpha
+        # Nearest centroid must be at least this much closer than the other
+        # for a sample to count as confidently classified -- 1.2 means the
+        # farther centroid must be >=20% more distant than the nearest one.
+        self.min_separation_ratio = min_separation_ratio
+        self.overlap_iou_threshold = overlap_iou_threshold
 
-    def assign(self, torso_colors: list[np.ndarray]) -> list[int]:
+    def _occluded_mask(self, boxes: list[tuple] | None, n: int) -> np.ndarray:
+        if not boxes:
+            return np.zeros(n, dtype=bool)
+        occluded = np.zeros(n, dtype=bool)
+        for i in range(n):
+            for j in range(i + 1, n):
+                if _iou(boxes[i], boxes[j]) > self.overlap_iou_threshold:
+                    occluded[i] = occluded[j] = True
+        return occluded
+
+    def assign(self, torso_colors: list[np.ndarray], boxes: list[tuple] | None = None) -> list[int | None]:
+        """`boxes` (same order/length as `torso_colors`, each an (x1,y1,x2,y2)
+        tuple) is optional but should be passed whenever available -- it's
+        what makes the occlusion check possible. Without it, only the
+        minimum-separation check applies."""
         if not torso_colors:
             return []
         x = np.stack(torso_colors)
+        n = len(torso_colors)
+        occluded = self._occluded_mask(boxes, n)
 
         if self.centroids is None:
-            if len(torso_colors) < 2:
-                return [0] * len(torso_colors)
-            labels = KMeans(n_clusters=2, n_init=4, random_state=0).fit_predict(x)
+            if n < 2:
+                return [0] * n
+            trusted = x[~occluded] if np.any(~occluded) else x
+            labels_trusted = KMeans(n_clusters=2, n_init=4, random_state=0).fit_predict(trusted)
             self.centroids = np.array([
-                x[labels == k].mean(axis=0) if np.any(labels == k) else x.mean(axis=0)
+                trusted[labels_trusted == k].mean(axis=0) if np.any(labels_trusted == k) else trusted.mean(axis=0)
                 for k in (0, 1)
             ])
-            return labels.tolist()
 
+        # Re-derived from the (possibly just-bootstrapped) centroids either
+        # way, so occluded/bootstrap samples get a distance-based label/None
+        # consistently with every later call, not a first-frame special case.
         dists = np.linalg.norm(x[:, None, :] - self.centroids[None, :, :], axis=2)
-        labels = dists.argmin(axis=1)
+        d_sorted = np.sort(dists, axis=1)
+        confident = d_sorted[:, 1] >= self.min_separation_ratio * np.maximum(d_sorted[:, 0], 1e-6)
+        trust_sample = confident & ~occluded
+        nearest = dists.argmin(axis=1)
+
         for k in (0, 1):
-            assigned = x[labels == k]
+            assigned = x[trust_sample & (nearest == k)]
             if len(assigned):
                 self.centroids[k] = (1 - self.ema_alpha) * self.centroids[k] + self.ema_alpha * assigned.mean(axis=0)
-        return labels.tolist()
+
+        return [int(nearest[i]) if trust_sample[i] else None for i in range(n)]
