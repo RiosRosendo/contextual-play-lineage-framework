@@ -73,6 +73,13 @@ POSE_ABS_COLLAPSE_RATIO = 0.5
 # alone this stricter one; see the dev log for why that case needs a
 # different fix, not a lower threshold, and remains a genuine miss here).
 POSE_EXTREME_ABS_RATIO = 0.3
+# How far a track's own head (box top edge) must drop below its recent
+# normal position, as a fraction of its recent normal box height, to count
+# as a genuine fall rather than a jump or a kick (see _collapse_runs).
+# 0.3 is a moderate bar: a real fall typically drops the head most of the
+# way to where the feet were (ratio approaching 1.0), while a jump moves
+# the head UP (a negative ratio) and a standing kick barely moves it.
+POSE_MIN_VERTICAL_DROP_RATIO = 0.3
 POSE_COLLAPSE_MIN_FRAMES = 3  # must stay collapsed this many consecutive frames -- not a single noisy frame
 POSE_OVERLAP_TOLERANCE_S = 1.0  # a collapse and a nearby opponent count as "the same moment" within this gap
 POSE_PROXIMITY_BOX_DIAGONALS = 2.0  # "nearby" boxes, scaled by box size so it holds at any camera distance
@@ -180,12 +187,17 @@ def _distance_speed_candidates(player_time_df: pd.DataFrame) -> list[dict]:
 def _collapse_runs(player_time_df: pd.DataFrame, team_index: dict) -> list[dict]:
     """Per track, finds aspect-ratio-collapse runs (a box going
     tall-and-narrow -> short-and-wide -- falling, being tackled, ending up
-    tangled on the ground). Tiered acceptance: a run needs
-    POSE_COLLAPSE_MIN_FRAMES consecutive collapsed frames to qualify UNLESS
-    at least one frame in it is extreme enough (POSE_EXTREME_ABS_RATIO) to
-    stand on its own -- a real collapse that's only ever observed for one
-    frame before the track is lost to occlusion (see module docstring)
-    would otherwise never qualify no matter how extreme that one frame is."""
+    tangled on the ground) that are ALSO accompanied by the track's own
+    head (box top) dropping relative to its recent normal height
+    (POSE_MIN_VERTICAL_DROP_RATIO) -- the aspect-ratio change alone doesn't
+    tell a fall apart from a jump or a kick, both of which change a box's
+    shape quickly too without the player ever going down. Tiered
+    acceptance on top of that: a run needs POSE_COLLAPSE_MIN_FRAMES
+    consecutive collapsed-and-falling frames to qualify UNLESS at least
+    one frame in it is extreme enough (POSE_EXTREME_ABS_RATIO) to stand on
+    its own -- a real collapse that's only ever observed for one frame
+    before the track is lost to occlusion (see module docstring) would
+    otherwise never qualify no matter how extreme that one frame is."""
     df = player_time_df[player_time_df["cls"] == "player"]
     if df.empty or "box_x1" not in df.columns:
         return []  # needs pixel boxes -- only the yolo backend carries these (see pipeline.py)
@@ -206,6 +218,24 @@ def _collapse_runs(player_time_df: pd.DataFrame, team_index: dict) -> list[dict]
         relative_collapse = (aspect < POSE_COLLAPSE_RATIO * baseline).fillna(False)
         absolute_collapse = (aspect < POSE_ABS_COLLAPSE_RATIO).fillna(False)
         extreme = (aspect < POSE_EXTREME_ABS_RATIO).fillna(False)
+
+        # A collapsing aspect ratio alone doesn't distinguish a real fall
+        # from a jump or a kick -- both change a box's shape quickly too.
+        # Real-footage validation (PROGRESS.md, 2026-07-16) found exactly
+        # this: a defensive wall jumping to block a free kick and a
+        # penalty kick both got misread as "collapses". A genuine fall's
+        # extra signature is that the player's own head (the box's top
+        # edge) actually moves DOWN the frame relative to their own recent
+        # normal height -- a jump moves it UP instead, and a standing kick
+        # barely moves it at all.
+        y1_baseline = g["box_y1"].rolling(window=window, min_periods=min_periods).median().shift(1)
+        h_baseline = h.rolling(window=window, min_periods=min_periods).median().shift(1)
+        vertical_drop_ratio = (g["box_y1"] - y1_baseline) / h_baseline.where(h_baseline > 0)
+        is_falling = (vertical_drop_ratio > POSE_MIN_VERTICAL_DROP_RATIO).fillna(False)
+
+        relative_collapse &= is_falling
+        absolute_collapse &= is_falling
+        extreme &= is_falling
         collapsed = relative_collapse | absolute_collapse
 
         start, has_extreme = None, False
