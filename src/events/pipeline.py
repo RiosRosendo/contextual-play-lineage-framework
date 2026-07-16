@@ -5,6 +5,7 @@ type, players involved, location").
 """
 from __future__ import annotations
 
+from src.events import pose_signals
 from src.events.foul_detector.detect import run_foul_detection
 from src.events.possession_events import detect_goal_events, detect_possession_events
 
@@ -23,7 +24,18 @@ def run_events(metrics_result: dict, external_goal_events: list[dict] | None = N
     events = []
     events += detect_possession_events(possession_df, player_time_df)
     events += external_goal_events if external_goal_events else detect_goal_events(player_time_df)
-    events += run_foul_detection(player_time_df)
+
+    foul_events = run_foul_detection(player_time_df)
+    # Keypoint-level contact types (hand_to_face / elbow_to_body /
+    # shirt_pull / leg_contact) annotate each foul candidate with what
+    # body parts actually met -- richer context for downstream foul
+    # reasoning than box proximity alone. No-op (empty lists) when the
+    # clip has no pose columns (e.g. the color backend).
+    contact_events = pose_signals.contact_type_events(player_time_df)
+    pose_signals.annotate_foul_contact_types(foul_events, contact_events)
+    events += foul_events
+
+    events += pose_signals.handball_events(player_time_df)
     return sorted(events, key=lambda e: e["time_s"])
 
 

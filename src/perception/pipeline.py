@@ -12,7 +12,7 @@ from __future__ import annotations
 import cv2
 import pandas as pd
 
-from src.perception import color_detector, pitch_calibration_cv, scene_cut, team_id, yolo_detector
+from src.perception import color_detector, pitch_calibration_cv, pose_estimator, scene_cut, team_id, yolo_detector
 from src.perception.bytetrack_lite import ByteTrackLite
 from src.perception.calibration import PitchCalibrator
 
@@ -83,29 +83,54 @@ def _run_yolo_backend_shot(video_path: str, calibrator: PitchCalibrator, fps: fl
                 person_box_tuples.append((b.x1, b.y1, b.x2, b.y2))
         team_labels = team_anchor.assign(torso_colors, person_box_tuples) if torso_colors else []
 
+        # Second (dual-pass) inference: full-body keypoints, matched onto the
+        # primary detector's person boxes by IoU. The primary detector keeps
+        # sole authority over which detections exist -- a person box with no
+        # acceptable pose match just gets no keypoints this frame.
+        pose_detections = pose_estimator.estimate_frame(frame) if person_box_tuples else []
+        keypoints_per_person = pose_estimator.associate_keypoints(person_box_tuples, pose_detections)
+
         det_dicts = []
         person_i = 0
         for b in boxes:
             if b.cls == "person":
                 label = team_labels[person_i]
                 team = None if label is None else f"team_{'a' if label == 0 else 'b'}"
+                keypoints = keypoints_per_person[person_i]
                 person_i += 1
             else:
                 team = None
+                keypoints = None
             det_dicts.append({
                 "cls": b.cls, "team": team, "box": (b.x1, b.y1, b.x2, b.y2), "conf": b.conf,
+                "keypoints": keypoints,
             })
 
         tracked = tracker.update(det_dicts)
         for t in tracked:
             cx, cy = (t["box"][0] + t["box"][2]) / 2, (t["box"][1] + t["box"][3]) / 2
             x_m, y_m = calibrator.pixel_to_pitch(cx, cy)
-            rows.append({
+            row = {
                 "frame": frame_idx, "time_s": frame_idx / fps, "track_id": t["track_id"] + track_id_offset,
                 "cls": "player" if t["cls"] == "person" else "ball", "team": t["team"],
                 "x": x_m, "y": y_m, "conf": t["conf"], "calib_source": calib_source,
                 "box_x1": t["box"][0], "box_y1": t["box"][1], "box_x2": t["box"][2], "box_y2": t["box"][3],
-            })
+            }
+            # Flat per-joint columns (kp_<name>_x/_y/_c, NaN when no skeleton
+            # was matched) rather than one nested-array column: flat floats
+            # survive the pandas -> Polars -> DuckDB path in Module B
+            # unchanged and vectorize cleanly for the pose-signal queries.
+            kpts = t.get("keypoints")
+            for k_i, name in enumerate(pose_estimator.KEYPOINT_NAMES):
+                if kpts is not None:
+                    row[f"kp_{name}_x"] = float(kpts[k_i][0])
+                    row[f"kp_{name}_y"] = float(kpts[k_i][1])
+                    row[f"kp_{name}_c"] = float(kpts[k_i][2])
+                else:
+                    row[f"kp_{name}_x"] = float("nan")
+                    row[f"kp_{name}_y"] = float("nan")
+                    row[f"kp_{name}_c"] = float("nan")
+            rows.append(row)
 
         processed += 1
         if processed % 100 == 0 or processed == total_frames:
