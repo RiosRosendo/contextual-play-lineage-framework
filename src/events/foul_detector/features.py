@@ -1,4 +1,4 @@
-"""Pre-contact feature extraction for the foul detector, per CLAUDE.md
+"""Pre-contact feature extraction for the foul detector, per the project spec
 section 4: "Extracts features from the window before contact (5+ seconds):
 who touched the ball first, each player's approach speed, trajectories."
 
@@ -62,7 +62,7 @@ def extract_video_branch_features(player_time_df: pd.DataFrame, track_id_a: int,
                                    contact_time_s: float) -> np.ndarray:
     """(4,) summary of the last VIDEO_WINDOW_S before contact: max closing
     speed, min distance, mean speed of each player. Placeholder for a real
-    video encoder's contact-biomechanics embedding (TODO.md)."""
+    video encoder's contact-biomechanics embedding (the internal task list)."""
     t_start = max(0.0, contact_time_s - VIDEO_WINDOW_S)
     a = _track_series(player_time_df, track_id_a, t_start, contact_time_s)
     b = _track_series(player_time_df, track_id_b, t_start, contact_time_s)

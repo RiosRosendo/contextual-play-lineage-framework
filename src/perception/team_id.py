@@ -1,4 +1,4 @@
-"""Team identification by jersey color clustering, per CLAUDE.md section 4
+"""Team identification by jersey color clustering, per the project spec section 4
 (Layer 1). Runs k-means (k=2) over the mean torso-crop color of all player
 detections in a frame/batch, and labels each detection by nearest cluster.
 The color_detector fallback already provides a team hint directly (used
@@ -31,7 +31,7 @@ def assign_teams(torso_colors: list[np.ndarray]) -> list[int]:
     single frame/batch in isolation, but calling this repeatedly (once per
     frame, or once per shot after a camera cut) gives no guarantee that
     label 0 keeps meaning the same real team across calls. Real footage
-    validation (Sunderland vs Liverpool, see PROGRESS.md) found this
+    validation (Sunderland vs Liverpool, see the dev log) found this
     matters: a 100s clip with 9 camera cuts re-clustered blind on every
     frame, so "team_a" wasn't guaranteed to mean the same real team after
     a cut. Use TeamColorAnchor instead when identity must persist across
@@ -66,7 +66,7 @@ class TeamColorAnchor:
     shots, which is what actually fixes the bug described in
     `assign_teams`'s docstring.
 
-    Real-footage validation (PROGRESS.md, 2026-07-15) found a second bug
+    Real-footage validation (the dev log, 2026-07-15) found a second bug
     this class needs to guard against: when two players' boxes overlap
     (occlusion, a tangle, a tackle), the torso crop can pick up a blend of
     both players' colors, producing an ambiguous sample that still gets

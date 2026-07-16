@@ -1,6 +1,6 @@
 """Layer 1 entry point: reads a video, runs detection + team ID + tracking +
 calibration per frame, and returns a per-frame per-object position table --
-the single artifact every downstream layer consumes. See CLAUDE.md section 4.
+the single artifact every downstream layer consumes. See the project spec section 4.
 
 Backend selection: real broadcast footage should use YOLOv8 (`backend="yolo"`);
 the synthetic test clip uses the HSV color detector (`backend="color"`) since

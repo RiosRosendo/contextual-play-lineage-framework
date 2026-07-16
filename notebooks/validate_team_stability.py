@@ -4,7 +4,7 @@ forced to a guess when it isn't clearly closer to one reference centroid
 than the other, or when its box significantly overlaps another player's --
 both meant to stop a single track's reported team flipping mid-life during
 occlusion (confirmed in Chelsea-Burnley and Southampton-Liverpool; see
-PROGRESS.md, 2026-07-15 entries).
+the dev log, 2026-07-15 entries).
 
 For each real clip, reports per track_id how many distinct non-None team
 labels it was ever given over its lifetime: 1 is stable (the fix is

@@ -21,13 +21,11 @@ Python 3.11, OpenCV, Ultralytics YOLOv8, PyTorch, scikit-learn, pandas/Polars, D
 
 Every layer and module runs end-to-end on a locally generated synthetic test clip, and Layer 1 has since been validated against real broadcast footage and is being incrementally deepened (starting with detection quality, then tracking).
 
-See [`TODO.md`](TODO.md) for the current per-layer/module task list, including open decisions and known limitations.
-
 ## Data & licensing
 
 - The synthetic test clip is generated locally (`src/perception/synthetic_clip.py`) and carries no external licensing constraints.
 - Real-footage validation used two openly-licensed research datasets, neither of which is redistributed in this repo:
-  - [SoccerSum](https://zenodo.org/records/10612084) (Simula) -- **CC BY-NC-ND 4.0** (non-commercial, no derivatives). Used only to evaluate detection quality against its ground truth; not used to validate tracking (its "sequences" turned out to have large real-time gaps between frames, not continuous motion -- see `TODO.md`).
+  - [SoccerSum](https://zenodo.org/records/10612084) (Simula) -- **CC BY-NC-ND 4.0** (non-commercial, no derivatives). Used only to evaluate detection quality against its ground truth; not used to validate tracking (its "sequences" turned out to have large real-time gaps between frames, not continuous motion).
   - [SoccerTrack v2](https://github.com/AtomScott/SoccerTrack-v2) -- CC BY 4.0.
 - `weights/soccersum_yolov8n_ball.pt` (a YOLOv8n ball detector fine-tuned on SoccerSum) is **not committed to this repo**. A model fine-tuned on CC BY-NC-ND data is arguably a derivative work, and SoccerSum's license prohibits distributing derivatives -- so that weight file stays local-only. `src/perception/yolo_detector.py` falls back cleanly to plain pretrained COCO weights when it's absent, which is what a fresh clone of this repo will always use unless you regenerate the fine-tuned weights yourself (`python -m notebooks.finetune_ball_detector prepare` then `train`, against your own SoccerSum download).
 

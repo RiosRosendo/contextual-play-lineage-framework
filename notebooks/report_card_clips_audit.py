@@ -3,7 +3,7 @@
 checked so far: the original Sunderland-Liverpool card (from
 notebooks/validate_foul_verdict_audit.py) plus the 5 new ones from
 notebooks/run_card_clips_audit.py. Produces the small accuracy table
-CLAUDE.md's paper needs, explicit about N, instead of the single anecdote.
+the project spec's paper needs, explicit about N, instead of the single anecdote.
 
 Also reports a statistical sanity check on the ONE apparent "hit"
 (Sunderland-Liverpool): given that clip's own candidate density (31

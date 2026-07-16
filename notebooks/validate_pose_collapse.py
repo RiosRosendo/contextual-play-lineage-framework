@@ -2,7 +2,7 @@
 (src/events/foul_detector/contact_candidates.py: find_pose_collapse_candidates,
 merged into find_contact_candidates) against the real clips whose actual
 foul moment the existing distance+speed gate missed entirely (see
-PROGRESS.md, 2026-07-15 stress-test entry).
+the dev log, 2026-07-15 stress-test entry).
 
 For each clip, reports:
 - distance/speed-only candidate count (the old behavior, unchanged)

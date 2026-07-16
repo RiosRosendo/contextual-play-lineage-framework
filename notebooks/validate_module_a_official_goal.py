@@ -3,7 +3,7 @@ the match's own official goal timestamp (Labels.json) as the backward-search
 trigger, instead of Layer 3's ball-position-crossing heuristic.
 
 Why: goal-line-crossing geometry depends on calibration succeeding during
-exactly a goal's own choppiest broadcast seconds (see PROGRESS.md -- this is
+exactly a goal's own choppiest broadcast seconds (see the dev log -- this is
 precisely where the pipeline's calibration has been failing). That's not the
 thing this project is actually trying to validate -- Module A's backward
 possession-chain search is. In a real deployment this trigger would come
@@ -12,7 +12,7 @@ own official Labels.json timestamps play that role, and we already have
 them (no NDA needed -- Labels.json is freely downloadable).
 
 Match: "2017-01-02 - Sunderland 2 - 2 Liverpool", the same clip used in the
-last several PROGRESS.md entries (data/raw/soccernet/foul_before_goal_clip.mp4,
+last several the dev log entries (data/raw/soccernet/foul_before_goal_clip.mp4,
 a 100s/2500-frame window, half-clock 37:20-39:00 of the 2nd half).
 Labels.json annotations in this window: two "y-card" events (team "away",
 i.e. Liverpool) at half-clock 37:49/37:50, and one "soccer-ball" (goal)

@@ -1,8 +1,8 @@
-"""Two-branch foul classifier, per CLAUDE.md section 4: a video encoder
+"""Two-branch foul classifier, per the project spec section 4: a video encoder
 (contact biomechanics) + a sequence encoder (trajectory features), fused
 before classification.
 
-Skeleton-phase simplification (documented in TODO.md, not a silent
+Skeleton-phase simplification (documented in the internal task list, not a silent
 shortcut): a real video encoder (VideoMAE/X3D) needs a pretrained checkpoint
 and fine-tuning data we don't have yet, so the "video branch" here is a
 small linear head over the motion-intensity summary from

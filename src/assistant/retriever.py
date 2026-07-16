@@ -1,9 +1,9 @@
 """Module C vector store: TF-IDF vectors over the local IFAB excerpt corpus,
-indexed with FAISS for nearest-neighbor retrieval (CLAUDE.md section 4 says
+indexed with FAISS for nearest-neighbor retrieval (the project spec section 4 says
 "vector store with Chroma or FAISS"). TF-IDF is used instead of a
 sentence-embedding model to keep the skeleton pass free of large model
 downloads -- swapping in real embeddings is a deepening-phase item
-(TODO.md).
+(the internal task list).
 """
 from __future__ import annotations
 

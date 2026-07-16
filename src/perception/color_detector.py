@@ -1,7 +1,7 @@
 """Fallback detector used when a YOLO backend isn't available or performs
 poorly on non-photorealistic footage (our synthetic test clip). HSV blob
 detection over the known jersey/ball colors. Deliberately simple per
-CLAUDE.md section 3 ("simplified formulas" for the first end-to-end pass).
+the project spec section 3 ("simplified formulas" for the first end-to-end pass).
 """
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import numpy as np
 
 # HSV ranges tuned to the synthetic clip's fixed BGR palette
 # (src/perception/synthetic_clip.py). Real-footage jersey colors would need
-# per-match calibration -- tracked in TODO.md as a Layer 1 deepening item.
+# per-match calibration -- tracked in the internal task list as a Layer 1 deepening item.
 _COLOR_RANGES = {
     "team_a": ((0, 120, 120), (10, 255, 255)),      # red
     "team_b": ((100, 120, 100), (120, 255, 255)),   # blue

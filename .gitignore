@@ -1,8 +1,7 @@
-# Internal working docs (kept locally for session-to-session continuity,
-# not pushed to the public repo per user instruction). TODO.md is tracked
-# and pushed as the project's public task list; PROGRESS.md is private.
+# Local-only files, never committed (same treatment as .env below)
 CLAUDE.md
 PROGRESS.md
+TODO.md
 
 # Python
 venv/

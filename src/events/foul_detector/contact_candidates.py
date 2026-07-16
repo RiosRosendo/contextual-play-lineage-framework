@@ -1,6 +1,6 @@
 """Finds candidate foul moments: frames where two opposing players are
 within a contact distance and closing fast. This drives what windows get
-fed to the two-branch classifier -- CLAUDE.md section 4 (Layer 3) says the
+fed to the two-branch classifier -- the project spec section 4 (Layer 3) says the
 detector looks at the 5+ seconds before contact, so the "event" here is the
 contact instant, and features.py extracts the pre-contact window around it.
 
@@ -8,7 +8,7 @@ Also adds a second, independent trigger (`find_pose_collapse_candidates`):
 the distance+speed gate above depends on both players being tracked
 normally (upright, distinguishable boxes) right through the moment of
 contact -- but that's exactly when a fall/tackle most often breaks the
-tracker. Real-footage stress-testing (PROGRESS.md, 2026-07-15) found 4 of 5
+tracker. Real-footage stress-testing (the dev log, 2026-07-15) found 4 of 5
 real single-card incidents produced ZERO contact candidates despite the
 foul being clearly visible on inspection -- players tangled on the ground,
 a standing tackle, a player down. A falling/tackled/tangled player's
@@ -30,7 +30,7 @@ MIN_CLOSING_SPEED_MPS = 3.0
 # Elite sprint speed tops out around 10-12 m/s (Usain Bolt's peak is ~12.4
 # m/s); this is the SUM of both players' individual speeds, so even a rare
 # head-on full-sprint collision shouldn't clear much past that. Real-footage
-# validation (Sunderland vs Liverpool, see PROGRESS.md) found "closing
+# validation (Sunderland vs Liverpool, see the dev log) found "closing
 # speeds" of 16-46 m/s coming out of the tracker on a heavily cut-up clip --
 # physically impossible for real contact, and a strong signal that a
 # tracking-ID switch (not a genuine collision) produced the position jump
@@ -42,7 +42,7 @@ MIN_GAP_S = 1.0  # avoid re-flagging the same contact on consecutive frames
 # Pose-collapse trigger: deliberately pixel-space, not calibrated meters --
 # a fall/tackle is fundamentally an image-space phenomenon (the box
 # geometry changes), and calibration reliability is exactly what's
-# documented as shaky in real broadcast footage (PROGRESS.md), so tying
+# documented as shaky in real broadcast footage (the dev log), so tying
 # this new path to it would reintroduce the same failure mode it's meant
 # to work around.
 POSE_BASELINE_WINDOW_S = 1.0  # how far back a track's "normal" standing aspect ratio is measured from
@@ -50,7 +50,7 @@ POSE_COLLAPSE_RATIO = 0.6  # current aspect ratio must drop below this fraction 
 # Absolute fallback for tracks with no usable baseline -- e.g. a track born
 # right after a scene cut, already mid-tangle, with no prior "standing"
 # frames to compare against (found in the Southampton-Liverpool clip; see
-# PROGRESS.md, 2026-07-15). Calibrated from the two real collapses measured
+# the dev log, 2026-07-15). Calibrated from the two real collapses measured
 # so far: Chelsea-Burnley's confirmed on-ground player read 0.23, and
 # Southampton-Liverpool's post-cut track started at 0.63 (already
 # recovering, so likely not even its lowest point). 0.5 sits between them.
@@ -58,7 +58,7 @@ POSE_COLLAPSE_RATIO = 0.6  # current aspect ratio must drop below this fraction 
 # standing" aspect ratio itself varies by camera framing -- Chelsea-Burnley's
 # own non-collapsed players in the same window read as low as ~0.44, close
 # enough to this threshold that a tight/wide framing could misfire; see the
-# validation entry in PROGRESS.md for the measured false-positive check.
+# validation entry in the dev log for the measured false-positive check.
 POSE_ABS_COLLAPSE_RATIO = 0.5
 # A single frame this far below normal is extreme enough to count as
 # sufficient evidence on its own, without needing POSE_COLLAPSE_MIN_FRAMES
@@ -66,7 +66,7 @@ POSE_ABS_COLLAPSE_RATIO = 0.5
 # collapse (0.23) only ever showed up for exactly one frame before the
 # track was lost to occlusion, which the sustained-run requirement was
 # rejecting outright regardless of the pairing/threshold relaxations
-# (PROGRESS.md, 2026-07-15). 0.3 is chosen to sit clearly below
+# (the dev log, 2026-07-15). 0.3 is chosen to sit clearly below
 # Chelsea-Burnley's 0.23 with margin, while staying clearly above the
 # extreme end (this is NOT calibrated against Southampton-Liverpool's 0.63
 # reading -- that value doesn't clear the *existing* 0.5 bar either, let
@@ -89,7 +89,7 @@ POSE_MERGE_WINDOW_S = 2.0  # merge a pose-collapse hit into an existing distance
 # occlusion check (see team_id.py, 2026-07-16) treats as untrustworthy --
 # so both real players in a genuine tackle often have team=None for the
 # whole contact instant, recovering a confident label only after it's
-# passed. Confirmed directly (PROGRESS.md, 2026-07-16) that requiring a
+# passed. Confirmed directly (the dev log, 2026-07-16) that requiring a
 # team label in the *exact* frame/window of contact was silently dropping
 # real, previously-caught fouls (Man City-Watford, Crystal Palace-Arsenal)
 # for this reason alone. TEAM_LOOKUP_WINDOW_S tolerates that gap: instead
@@ -221,7 +221,7 @@ def _collapse_runs(player_time_df: pd.DataFrame, team_index: dict) -> list[dict]
 
         # A collapsing aspect ratio alone doesn't distinguish a real fall
         # from a jump or a kick -- both change a box's shape quickly too.
-        # Real-footage validation (PROGRESS.md, 2026-07-16) found exactly
+        # Real-footage validation (the dev log, 2026-07-16) found exactly
         # this: a defensive wall jumping to block a free kick and a
         # penalty kick both got misread as "collapses". A genuine fall's
         # extra signature is that the player's own head (the box's top
@@ -303,7 +303,7 @@ def find_pose_collapse_candidates(player_time_df: pd.DataFrame) -> list[dict]:
     same moment.
 
     Deliberately does NOT require the second player to also collapse:
-    real-footage validation (PROGRESS.md, 2026-07-15) found this was the
+    real-footage validation (the dev log, 2026-07-15) found this was the
     actual blocker in the one clip where a genuine collapse WAS detected
     (Chelsea-Burnley) -- only one of the two real players involved in the
     tangle showed a large-enough box-geometry change; the other stayed
@@ -319,7 +319,7 @@ Applies the same MAX_CLOSING_SPEED_MPS plausibility cap the
     distance/speed gate, a near-zero speed is expected and legitimate for
     a pose-collapse candidate, e.g. two players already stationary/tangled
     on the ground.
-    First attempt at this function (see PROGRESS.md) skipped this cap and
+    First attempt at this function (see the dev log) skipped this cap and
     filtered "nearby" by a per-row team check instead of each track's
     predominant team -- both real bugs, not a looser-by-design tradeoff:
     together they produced dozens of candidates per clip, including
@@ -368,7 +368,7 @@ Applies the same MAX_CLOSING_SPEED_MPS plausibility cap the
             # not the collapsing player's own. A box rapidly changing shape
             # and position as a player falls inflates their own finite-
             # difference speed_mps into an artifact of the collapse itself,
-            # not real movement (confirmed directly, PROGRESS.md 2026-07-16:
+            # not real movement (confirmed directly, the dev log 2026-07-16:
             # 50.7 m/s for Chelsea-Burnley's falling player, 10.24 m/s for
             # Palace-Arsenal's) -- summing it into a MAX_CLOSING_SPEED_MPS
             # check built for the *distance/speed* trigger (where an

@@ -1,6 +1,6 @@
 """Classical-CV pitch calibration: detects real pitch keypoints in a frame
 and computes a homography to real-world pitch coordinates, replacing the
-fixed-guess placeholders in calibration.py -- CLAUDE.md section 4.
+fixed-guess placeholders in calibration.py -- the project spec section 4.
 
 Two strategies, tried in order by `calibrate_frame`:
 
@@ -76,7 +76,7 @@ def _line_mask(frame_bgr: np.ndarray, exclude_mask: np.ndarray, pitch_mask: np.n
     """Top-hat filter: highlights thin bright pitch lines by *local*
     contrast against the grass, which works even when the lines are faint/
     worn (a flat brightness threshold picks up player jerseys instead --
-    see PROGRESS.md for how this was found)."""
+    see the dev log for how this was found)."""
     gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 21))
     tophat = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kernel)

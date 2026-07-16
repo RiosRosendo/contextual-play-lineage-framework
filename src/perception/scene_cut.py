@@ -1,6 +1,6 @@
 """Cheap scene-cut (camera angle change) detector. High priority per
 Rosendo: real broadcast footage cuts between camera angles within seconds
-(confirmed directly on the SoccerNet clip -- see PROGRESS.md), and both
+(confirmed directly on the SoccerNet clip -- see the dev log), and both
 calibration (one homography assumed per clip) and tracking (identities
 assumed continuous) silently break across a cut with no warning. This
 flags cut points so callers can split a clip into per-shot segments before

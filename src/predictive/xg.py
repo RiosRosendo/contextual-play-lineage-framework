@@ -1,8 +1,8 @@
-"""Layer 4 expected goals (xG). CLAUDE.md section 4 targets gradient
+"""Layer 4 expected goals (xG). the project spec section 4 targets gradient
 boosting (XGBoost/LightGBM) over geometric shot features; for the first
 end-to-end pass this is a hand-set logistic formula over distance and angle
 to goal -- the same simplified-formula-first approach used elsewhere.
-Training an XGBoost model on real shot data is tracked in TODO.md.
+Training an XGBoost model on real shot data is tracked in the internal task list.
 """
 from __future__ import annotations
 

@@ -1,5 +1,5 @@
 """Layer 2 entry point: takes Layer 1's per-frame position table and
-produces the player-time tabular dataset (CLAUDE.md section 4 output),
+produces the player-time tabular dataset (the project spec section 4 output),
 plus the tactical aggregates (possession, heatmaps, formation) consumed by
 Module B and Layer 3.
 """

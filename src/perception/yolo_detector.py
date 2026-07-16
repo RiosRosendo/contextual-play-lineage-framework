@@ -17,7 +17,7 @@ pretrained COCO classes (person=0, sports ball=32), so everything still
 works on a fresh clone with no extra setup.
 
 Neither model distinguishes players from the referee yet -- that needs
-further fine-tuning (tracked in TODO.md). Team split is delegated to
+further fine-tuning (tracked in the internal task list). Team split is delegated to
 team_id.py on top of the person boxes.
 """
 from __future__ import annotations

@@ -1,5 +1,5 @@
 """Layer 2 tactical/spatial metrics: possession, heatmaps, formation shape.
-Derived mathematically from Layer 1 positions, per CLAUDE.md section 4.
+Derived mathematically from Layer 1 positions, per the project spec section 4.
 """
 from __future__ import annotations
 

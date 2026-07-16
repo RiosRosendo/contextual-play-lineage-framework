@@ -1,6 +1,6 @@
 """Fine-tunes YOLOv8n's ball detection on SoccerSum, per Rosendo's decision
 to prioritize broadcast-style framing (SoccerSum) over full-pitch panoramas
-(SoccerTrack v2) -- see TODO.md "Future work / out of scope for now".
+(SoccerTrack v2) -- see the internal task list "Future work / out of scope for now".
 
 Player detection is already reasonable out of the box (F1=0.88 in the
 earlier sanity check, notebooks/soccersum_layer1_validation.py); ball

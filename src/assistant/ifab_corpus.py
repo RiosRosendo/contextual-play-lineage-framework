@@ -4,7 +4,7 @@ IMPORTANT: these are paraphrased summaries written for this skeleton, NOT
 verbatim quotes from the official IFAB Laws of the Game. Presenting them as
 official text would risk a hallucinated citation. Before any real use, this
 corpus must be replaced with actual extracted text from the official IFAB
-PDF (TODO.md) -- until then, explanations must clearly disclose that the
+PDF (the internal task list) -- until then, explanations must clearly disclose that the
 citation is a paraphrase, not a quote.
 """
 from __future__ import annotations

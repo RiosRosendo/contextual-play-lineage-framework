@@ -1,6 +1,6 @@
 """Layer 3 entry point: combines possession-derived events (pass, turnover,
 shot, goal) with the foul detector's output into one chronological event
-list -- the CLAUDE.md section 4 output ("list of events with timestamp,
+list -- the the project spec section 4 output ("list of events with timestamp,
 type, players involved, location").
 """
 from __future__ import annotations

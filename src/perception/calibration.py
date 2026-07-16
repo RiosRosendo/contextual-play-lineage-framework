@@ -1,4 +1,4 @@
-"""Camera calibration / pixel-to-pitch homography, per CLAUDE.md section 4
+"""Camera calibration / pixel-to-pitch homography, per the project spec section 4
 (Layer 1).
 
   - For the synthetic clip, the true pixel-per-meter scale is known exactly

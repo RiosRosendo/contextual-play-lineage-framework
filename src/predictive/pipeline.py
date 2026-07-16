@@ -1,6 +1,6 @@
 """Layer 4 entry point: attaches xG to shot events, pass probability to pass
 events, and computes a pitch-control snapshot at the moment of the goal --
-CLAUDE.md section 4 output ("probability maps and tactical performance
+the project spec section 4 output ("probability maps and tactical performance
 metrics").
 """
 from __future__ import annotations

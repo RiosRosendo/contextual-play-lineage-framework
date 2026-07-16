@@ -1,6 +1,6 @@
 """Module C entry point: given a Module A review alert, retrieves the
 relevant IFAB excerpt and generates a grounded natural-language explanation
--- CLAUDE.md section 4 ("generates a grounded natural-language explanation
+-- the project spec section 4 ("generates a grounded natural-language explanation
 without hallucinating the citation").
 
 No external LLM call is made by default: the explanation is template-filled
@@ -8,7 +8,7 @@ directly from the retrieved excerpt and event metadata, so every sentence
 traces back to a concrete source (the event dict or the local corpus). This
 also means the skeleton runs with no API key configured. Wiring an actual
 LLM call to rephrase this (kept strictly grounded to the same retrieved
-excerpt) is a TODO.md item, off by default.
+excerpt) is a the internal task list item, off by default.
 
 Also provides a second, independent capability: `assess_foul_candidate` /
 `explain_foul_candidate` audit a single Layer 3 foul candidate on its own
@@ -26,7 +26,7 @@ _QUERY_BY_CONTEXT = "foul careless reckless excessive force direct free kick"
 
 # Closing speed is the only contact-intensity signal Layer 3 already
 # computes, so it stands in here for the biomechanics-based severity
-# judgment a real video encoder would make (CLAUDE.md section 3: simplest
+# judgment a real video encoder would make (the project spec section 3: simplest
 # version first, not a real severity classifier). Thresholds are a
 # deliberately round, illustrative split of contact_candidates.py's
 # existing plausible range (3-12 m/s combined closing speed).
@@ -66,7 +66,7 @@ def assess_foul_candidate(event: dict) -> dict:
     a real 100s clip scored 0.18-0.48, i.e. below the nominal 0.5
     threshold with no exceptions -- a property of random initialization,
     not evidence none of the contacts were fouls). Once the classifier is
-    trained (TODO.md), gating the verdict on `is_foul` becomes meaningful
+    trained (the internal task list), gating the verdict on `is_foul` becomes meaningful
     and should replace this."""
     retriever = get_retriever()
     severity = _severity_for(event["closing_speed_mps"])
@@ -99,7 +99,7 @@ def explain_foul_candidate(event: dict) -> str:
         f"Grounding ({excerpt['law']} -- {excerpt['title']}):\n"
         f"  \"{excerpt['text']}\"\n\n"
         f"Note: severity is a simplified closing-speed proxy for this skeleton "
-        f"(CLAUDE.md section 3), not a biomechanics-based judgment, and the excerpt "
+        f"(the project spec section 3), not a biomechanics-based judgment, and the excerpt "
         f"above is a paraphrased summary, not verbatim official IFAB text -- see "
         f"src/assistant/ifab_corpus.py."
     )

@@ -1,6 +1,6 @@
 """Generates a short synthetic single-camera match clip for end-to-end skeleton
-validation while real SoccerNet footage is pending NDA access (see TODO.md /
-PROGRESS.md). Renders a top-down pitch with scripted player/ball trajectories
+validation while real SoccerNet footage is pending NDA access (see the internal task list /
+the dev log). Renders a top-down pitch with scripted player/ball trajectories
 that include one unflagged foul immediately preceding a goal, so Module A's
 lineage-graph alert has something real to catch.
 

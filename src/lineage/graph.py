@@ -1,4 +1,4 @@
-"""Module A -- Play lineage graph, per CLAUDE.md section 4: events connected
+"""Module A -- Play lineage graph, per the project spec section 4: events connected
 by possession continuity (NetworkX). When a goal occurs, traverse the graph
 backward; if a "probable unflagged foul" node is found within the same
 uninterrupted possession sequence, raise a review alert.

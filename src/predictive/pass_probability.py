@@ -1,8 +1,8 @@
-"""Layer 4 pass probability. CLAUDE.md section 4 targets a GNN over game
+"""Layer 4 pass probability. the project spec section 4 targets a GNN over game
 state; for the first end-to-end pass this is a hand-set logistic formula
 over geometric features (distance, angle change, nearest-defender pressure)
 -- same "simplified formula first" philosophy as the other layers. Swapping
-in a PyTorch Geometric GNN is tracked in TODO.md.
+in a PyTorch Geometric GNN is tracked in the internal task list.
 """
 from __future__ import annotations
 

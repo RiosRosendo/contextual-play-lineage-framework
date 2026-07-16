@@ -1,7 +1,7 @@
 """Two-stage IoU tracker inspired by ByteTrack (Zhang et al., 2022), used in
 place of Ultralytics' built-in ByteTrack/BoT-SORT for the YOLO backend.
 
-CLAUDE.md section 4 names ByteTrack/BoT-SORT specifically, and both were
+the project spec section 4 names ByteTrack/BoT-SORT specifically, and both were
 tried first via `model.track(..., tracker="bytetrack.yaml" / "botsort.yaml")`.
 Both showed the same bug in this environment: per-frame detection counts
 collapsed from ~15-20 (correct, matches plain `model.predict()` on the same
@@ -11,7 +11,7 @@ our fine-tuned model and the plain pretrained COCO model, so it's an
 Ultralytics/lap library issue in this environment, not something specific
 to our model or code. A numpy downgrade was floated as a possible ABI-
 mismatch fix but reverted immediately since it breaks opencv's own numpy
->=2 requirement. See PROGRESS.md "Tracker replacement" entry for the full
+>=2 requirement. See the dev log "Tracker replacement" entry for the full
 investigation.
 
 This module keeps ByteTrack's core idea (which is the actual point of using

@@ -12,7 +12,7 @@ Two checks:
    (e.g. the 6-yard box) for a genuinely independent cross-check did not
    turn up a reliable one on this frame -- an earlier apparent success was
    actually the same line found twice via overlapping search windows, not
-   a real independent feature (see PROGRESS.md). What IS a real, measured
+   a real independent feature (see the dev log). What IS a real, measured
    finding: the fitted homography is only reliable *near* the goal area it
    was calibrated from -- checked directly by transforming a point on the
    near touchline (250-350px further away) and getting wildly
@@ -20,7 +20,7 @@ Two checks:
 
 2. Before/after Layer 2 speed impact on the SoccerTrack v2 clip (the only
    continuous real-motion footage available -- SoccerSum's "sequences"
-   turned out not to be temporally continuous, see PROGRESS.md), comparing
+   turned out not to be temporally continuous, see the dev log), comparing
    the flat placeholder calibration against the full-pitch-boundary
    strategy on the exact same clip/detections/tracks.
 

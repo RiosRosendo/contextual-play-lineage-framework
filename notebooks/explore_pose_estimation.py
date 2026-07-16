@@ -6,7 +6,7 @@ checkpoint (COCO 17-keypoint format).
 
 Investigates, on the 3 real clips with a visually-confirmed foul the current
 aspect-ratio approach still misses (Chelsea-Burnley, Swansea-Man Utd,
-Southampton-Liverpool -- see PROGRESS.md, 2026-07-15 entries):
+Southampton-Liverpool -- see the dev log, 2026-07-15 entries):
 1. Whether pose estimation runs at a usable speed on this CPU-only setup.
 2. Detection quality on a sample frame vs. the existing plain person detector.
 3. Whether keypoint-derived signals (torso angle from vertical, hip height

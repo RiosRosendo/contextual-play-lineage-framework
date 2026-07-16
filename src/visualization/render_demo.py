@@ -1,6 +1,6 @@
 """Renders a video of a pipeline run with detections, events, and review
 alerts overlaid, as they happen. This is a demo/reporting utility on top
-of the existing pipeline, not a new architectural layer -- CLAUDE.md's
+of the existing pipeline, not a new architectural layer -- the project spec's
 four layers and three modules are unchanged.
 
 Two rendering modes, chosen automatically from the input clip:

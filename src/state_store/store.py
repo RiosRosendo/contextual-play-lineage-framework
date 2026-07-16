@@ -1,8 +1,8 @@
-"""Module B -- Match State Store, per CLAUDE.md section 4: three tiers
+"""Module B -- Match State Store, per the project spec section 4: three tiers
 (frame-level in-memory, aggregate-level and event-level in DuckDB). Other
 modules only ever call the `query_*` methods here; only the pipeline runner
 calls `write_*`, so this module never depends on Layers 2-4 or Modules A/C
-(no reverse dependency, per CLAUDE.md section 9).
+(no reverse dependency, per the project spec section 9).
 """
 from __future__ import annotations
 

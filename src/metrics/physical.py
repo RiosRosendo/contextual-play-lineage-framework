@@ -1,5 +1,5 @@
 """Layer 2 physical metrics: speed, acceleration, distance covered. Pure math
-over Layer 1's per-frame position table -- no new models, per CLAUDE.md
+over Layer 1's per-frame position table -- no new models, per the project spec
 section 4.
 """
 from __future__ import annotations

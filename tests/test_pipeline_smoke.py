@@ -1,4 +1,4 @@
-"""Smoke test for the full skeleton pipeline (CLAUDE.md section 3: validate
+"""Smoke test for the full skeleton pipeline (the project spec section 3: validate
 the whole architecture runs end-to-end before deepening any single layer).
 Not a correctness test of any individual model -- just confirms every layer
 and module wires together without errors and Module A's review-alert

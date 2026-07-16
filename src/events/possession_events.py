@@ -1,6 +1,6 @@
 """Layer 3 discrete events derived from possession continuity: passes,
 turnovers, and shots. Simplified heuristics over Layer 2's per-frame
-possession table, per CLAUDE.md section 3/4 -- no learned models needed for
+possession table, per the project spec section 3/4 -- no learned models needed for
 this part.
 """
 from __future__ import annotations
@@ -102,7 +102,7 @@ def official_goal_event(time_s: float, team: str | None = None) -> dict:
     match's own official goal timestamp, SoccerNet's Labels.json in this
     project) instead of `detect_goal_events`'s ball-position-crossing
     heuristic. Same schema (plus a `source` tag), so Module A's lineage
-    graph treats it identically -- see PROGRESS.md for why this exists:
+    graph treats it identically -- see the dev log for why this exists:
     goal-line geometry depends on calibration succeeding during exactly a
     goal's own choppiest broadcast seconds, which isn't itself the thing
     Module A's backward-search logic is trying to validate. `team` here is
@@ -116,7 +116,7 @@ def official_goal_event(time_s: float, team: str | None = None) -> dict:
 
 def detect_goal_events(player_time_df: pd.DataFrame) -> list[dict]:
     """A "goal" is the ball crossing within GOAL_LINE_MARGIN_M of either goal
-    line, inside the goal mouth's y-range. Deliberately simple -- CLAUDE.md
+    line, inside the goal mouth's y-range. Deliberately simple -- the project spec
     section 3 -- and only fires once per approach (the first frame it enters
     the goal-line margin) rather than debouncing multi-frame lingering."""
     ball_df = player_time_df[player_time_df["cls"] == "ball"].sort_values("time_s")

@@ -1,4 +1,4 @@
-"""Layer 4 pitch control. CLAUDE.md section 4 targets a proper spatial
+"""Layer 4 pitch control. the project spec section 4 targets a proper spatial
 dominance surface (Spearman et al.-style influence functions); the skeleton
 version is a coarse time-to-reach grid: each cell is "controlled" by
 whichever team could get a player there first, assuming a flat max speed.

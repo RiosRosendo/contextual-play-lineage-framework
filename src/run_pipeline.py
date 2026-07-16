@@ -2,7 +2,7 @@
 writing through Module B (state store) and finishing with Module A (lineage
 graph + review alerts) and Module C (grounded explanation). This is the
 single script that validates the whole architecture runs without errors on
-one short clip, per CLAUDE.md section 3.
+one short clip, per the project spec section 3.
 """
 from __future__ import annotations
 
