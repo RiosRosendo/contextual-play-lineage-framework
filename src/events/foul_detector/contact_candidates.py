@@ -280,10 +280,15 @@ def find_pose_collapse_candidates(player_time_df: pd.DataFrame) -> list[dict]:
     close to their own baseline despite being clearly part of the same
     contact.
 
-    Applies the same MAX_CLOSING_SPEED_MPS plausibility cap the
-    distance/speed gate uses (no MIN floor here -- unlike that gate, a
-    near-zero closing speed is expected and legitimate for a pose-collapse
-    candidate, e.g. two players already stationary/tangled on the ground).
+Applies the same MAX_CLOSING_SPEED_MPS plausibility cap the
+    distance/speed gate uses, but only to the OTHER player's speed, not the
+    collapsing player's own (see the check itself for why -- a real
+    collapse inflates the falling player's own computed speed by
+    construction, so including it rejected the clearest real falls
+    hardest; fixed 2026-07-16). No MIN floor here either way -- unlike the
+    distance/speed gate, a near-zero speed is expected and legitimate for
+    a pose-collapse candidate, e.g. two players already stationary/tangled
+    on the ground.
     First attempt at this function (see PROGRESS.md) skipped this cap and
     filtered "nearby" by a per-row team check instead of each track's
     predominant team -- both real bugs, not a looser-by-design tradeoff:
@@ -329,9 +334,21 @@ def find_pose_collapse_candidates(player_time_df: pd.DataFrame) -> list[dict]:
             avg_diag = (run["diag"] + other["diag"]) / 2
             if avg_diag <= 0 or dist_px > POSE_PROXIMITY_BOX_DIAGONALS * avg_diag:
                 continue
-            closing_speed = run["speed_mps"] + other["speed_mps"]
-            if closing_speed > MAX_CLOSING_SPEED_MPS:
+            # Only the OTHER player's speed needs to stay plausible here --
+            # not the collapsing player's own. A box rapidly changing shape
+            # and position as a player falls inflates their own finite-
+            # difference speed_mps into an artifact of the collapse itself,
+            # not real movement (confirmed directly, PROGRESS.md 2026-07-16:
+            # 50.7 m/s for Chelsea-Burnley's falling player, 10.24 m/s for
+            # Palace-Arsenal's) -- summing it into a MAX_CLOSING_SPEED_MPS
+            # check built for the *distance/speed* trigger (where an
+            # implausible sum means a tracking-ID-switch, not a real
+            # collapse) was rejecting the clearest, most violent real falls
+            # hardest. The other player is expected to still be tracked
+            # normally, so their own speed alone is the meaningful check.
+            if other["speed_mps"] > MAX_CLOSING_SPEED_MPS:
                 continue
+            closing_speed = other["speed_mps"]
             pair_key = tuple(sorted((run["track_id"], other_id)))
             if pair_key in seen_pairs:
                 continue
