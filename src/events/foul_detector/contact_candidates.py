@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import pandas as pd
 
 CONTACT_DIST_M = 1.5
@@ -77,9 +78,66 @@ POSE_OVERLAP_TOLERANCE_S = 1.0  # a collapse and a nearby opponent count as "the
 POSE_PROXIMITY_BOX_DIAGONALS = 2.0  # "nearby" boxes, scaled by box size so it holds at any camera distance
 POSE_MERGE_WINDOW_S = 2.0  # merge a pose-collapse hit into an existing distance/speed hit for the same pair
 
+# Real contact IS box overlap, which is exactly what TeamColorAnchor's
+# occlusion check (see team_id.py, 2026-07-16) treats as untrustworthy --
+# so both real players in a genuine tackle often have team=None for the
+# whole contact instant, recovering a confident label only after it's
+# passed. Confirmed directly (PROGRESS.md, 2026-07-16) that requiring a
+# team label in the *exact* frame/window of contact was silently dropping
+# real, previously-caught fouls (Man City-Watford, Crystal Palace-Arsenal)
+# for this reason alone. TEAM_LOOKUP_WINDOW_S tolerates that gap: instead
+# of requiring the exact instant to already be confidently classified,
+# every team lookup searches this far around it for the nearest confident
+# label on the SAME track.
+TEAM_LOOKUP_WINDOW_S = 1.0
+# For the pose-collapse trigger's opposing-player proximity check
+# specifically: averaging that player's position over the full
+# POSE_OVERLAP_TOLERANCE_S search window (up to ~2s total) diluted true
+# nearness whenever they moved substantially across it (e.g. arriving at
+# and then leaving the tangle) -- confirmed this was blocking Chelsea-
+# Burnley's real collapse from pairing even after it started producing a
+# qualifying run. Position stats are now averaged over this much narrower
+# window, centered on the run's own timing, falling back to the full
+# tolerance window only if the narrow one has no data at all for that
+# player.
+POSE_PROXIMITY_WINDOW_S = 0.3
+
+
+def _build_known_team_index(players: pd.DataFrame) -> dict:
+    """Per track_id, the sorted (time_s, team) pairs for frames where the
+    team was confidently classified (team_id.TeamColorAnchor didn't
+    abstain) -- built once per call so every team lookup below is a fast
+    nearest-neighbor search instead of a fresh DataFrame filter."""
+    known = players.dropna(subset=["team"])
+    index = {}
+    for track_id, g in known.groupby("track_id"):
+        g = g.sort_values("time_s")
+        index[track_id] = (g["time_s"].to_numpy(), g["team"].to_numpy())
+    return index
+
+
+def _nearest_known_team(index: dict, track_id, t: float, window_s: float = TEAM_LOOKUP_WINDOW_S) -> str | None:
+    """The confidently-known team label for this track closest to time t,
+    if one exists within window_s -- tolerates the exact instant being
+    ambiguous/occluded (see TEAM_LOOKUP_WINDOW_S) rather than requiring
+    that specific frame to already carry a confident label."""
+    if track_id not in index:
+        return None
+    times, teams = index[track_id]
+    pos = np.searchsorted(times, t)
+    best_team, best_dt = None, window_s
+    for i in (pos - 1, pos):
+        if 0 <= i < len(times):
+            dt = abs(times[i] - t)
+            if dt <= best_dt:
+                best_dt = dt
+                best_team = teams[i]
+    return best_team
+
 
 def _distance_speed_candidates(player_time_df: pd.DataFrame) -> list[dict]:
     players = player_time_df[player_time_df["cls"] == "player"]
+    team_index = _build_known_team_index(players)
     candidates = []
     last_flagged_t = {}
 
@@ -88,14 +146,15 @@ def _distance_speed_candidates(player_time_df: pd.DataFrame) -> list[dict]:
         for i in range(len(rows)):
             for j in range(i + 1, len(rows)):
                 a, b = rows[i], rows[j]
-                # pd.isna, not `is None`: a DataFrame-sourced None can come back
-                # as float NaN after passing through pandas ops (confirmed via
-                # TeamColorAnchor's new None-producing path, 2026-07-16) --
-                # `a["team"] is None` silently misses that, and NaN != NaN means
-                # the `==` check above doesn't catch a NaN-vs-NaN "match" either,
-                # so two untrustworthy samples were slipping through as a valid
-                # opposing-team pair.
-                if a["team"] == b["team"] or pd.isna(a["team"]) or pd.isna(b["team"]):
+                t = a["time_s"]
+                # Nearest-known lookup, not each row's own (possibly None/NaN)
+                # team value: real contact is box overlap, which is exactly
+                # when TeamColorAnchor abstains, so requiring the exact frame
+                # to already carry a confident label was silently dropping
+                # real fouls (see TEAM_LOOKUP_WINDOW_S above).
+                team_a = _nearest_known_team(team_index, a["track_id"], t)
+                team_b = _nearest_known_team(team_index, b["track_id"], t)
+                if team_a is None or team_b is None or team_a == team_b:
                     continue
                 dist = ((a["x"] - b["x"]) ** 2 + (a["y"] - b["y"]) ** 2) ** 0.5
                 if dist > CONTACT_DIST_M:
@@ -104,14 +163,13 @@ def _distance_speed_candidates(player_time_df: pd.DataFrame) -> list[dict]:
                 if closing_speed < MIN_CLOSING_SPEED_MPS or closing_speed > MAX_CLOSING_SPEED_MPS:
                     continue
                 pair_key = tuple(sorted((a["track_id"], b["track_id"])))
-                t = a["time_s"]
                 if t - last_flagged_t.get(pair_key, -999) < MIN_GAP_S:
                     continue
                 last_flagged_t[pair_key] = t
                 candidates.append({
                     "time_s": t, "frame": frame,
-                    "track_id_a": a["track_id"], "team_a": a["team"],
-                    "track_id_b": b["track_id"], "team_b": b["team"],
+                    "track_id_a": a["track_id"], "team_a": team_a,
+                    "track_id_b": b["track_id"], "team_b": team_b,
                     "location": ((a["x"] + b["x"]) / 2, (a["y"] + b["y"]) / 2),
                     "closing_speed_mps": closing_speed,
                     "trigger": "distance_speed",
@@ -119,7 +177,7 @@ def _distance_speed_candidates(player_time_df: pd.DataFrame) -> list[dict]:
     return candidates
 
 
-def _collapse_runs(player_time_df: pd.DataFrame) -> list[dict]:
+def _collapse_runs(player_time_df: pd.DataFrame, team_index: dict) -> list[dict]:
     """Per track, finds aspect-ratio-collapse runs (a box going
     tall-and-narrow -> short-and-wide -- falling, being tackled, ending up
     tangled on the ground). Tiered acceptance: a run needs
@@ -160,29 +218,20 @@ def _collapse_runs(player_time_df: pd.DataFrame) -> list[dict]:
                     has_extreme = has_extreme or bool(extreme.iloc[i])
             elif start is not None:
                 if has_extreme or i - start >= POSE_COLLAPSE_MIN_FRAMES:
-                    runs.append(_run_dict(track_id, g, start, i - 1))
+                    runs.append(_run_dict(track_id, g, start, i - 1, team_index))
                 start, has_extreme = None, False
         if start is not None and (has_extreme or len(g) - start >= POSE_COLLAPSE_MIN_FRAMES):
-            runs.append(_run_dict(track_id, g, start, len(g) - 1))
+            runs.append(_run_dict(track_id, g, start, len(g) - 1, team_index))
     return runs
 
 
-def _predominant_team(team_series: pd.Series) -> str | None:
-    """The most common non-null team label over a window, not just the
-    first row -- a single row's team can be wrong (TeamColorAnchor can
-    mislabel a player mid-tangle, see PROGRESS.md, 2026-07-15), and using
-    `.iloc[0]` let a momentary mislabel flip a track's reported team,
-    which was producing nonsensical same-team "candidates"."""
-    counts = team_series.dropna().value_counts()
-    return counts.index[0] if len(counts) else None
-
-
-def _run_dict(track_id, g: pd.DataFrame, i0: int, i1: int) -> dict:
+def _run_dict(track_id, g: pd.DataFrame, i0: int, i1: int, team_index: dict) -> dict:
     seg = g.iloc[i0:i1 + 1]
     diag = ((seg["box_x2"] - seg["box_x1"]) ** 2 + (seg["box_y2"] - seg["box_y1"]) ** 2) ** 0.5
+    start_t, end_t = float(seg["time_s"].iloc[0]), float(seg["time_s"].iloc[-1])
     return {
-        "track_id": track_id, "team": _predominant_team(seg["team"]),
-        "start_time_s": float(seg["time_s"].iloc[0]), "end_time_s": float(seg["time_s"].iloc[-1]),
+        "track_id": track_id, "team": _nearest_known_team(team_index, track_id, (start_t + end_t) / 2),
+        "start_time_s": start_t, "end_time_s": end_t,
         "cx": float(((seg["box_x1"] + seg["box_x2"]) / 2).mean()),
         "cy": float(((seg["box_y1"] + seg["box_y2"]) / 2).mean()),
         "diag": float(diag.mean()),
@@ -191,17 +240,22 @@ def _run_dict(track_id, g: pd.DataFrame, i0: int, i1: int) -> dict:
     }
 
 
-def _track_window_stats(df: pd.DataFrame, track_id, t0: float, t1: float) -> dict | None:
+def _track_window_stats(df: pd.DataFrame, track_id, t0: float, t1: float,
+                         team_index: dict, team_lookup_t: float) -> dict | None:
     """Same summary `_run_dict` computes (box center/diagonal, calibrated
     position, speed) but for a plain time window on a given track, not a
     collapse run -- used to describe a nearby opposing player who may not
-    have collapsed at all (see `find_pose_collapse_candidates`)."""
+    have collapsed at all (see `find_pose_collapse_candidates`).
+    `team_lookup_t` is looked up separately from the [t0, t1] position
+    window -- it should be the run's own timing, not this window's edges,
+    since the team lookup already tolerates a gap on its own terms
+    (TEAM_LOOKUP_WINDOW_S)."""
     seg = df[(df["track_id"] == track_id) & (df["time_s"] >= t0) & (df["time_s"] <= t1)]
     if seg.empty:
         return None
     diag = ((seg["box_x2"] - seg["box_x1"]) ** 2 + (seg["box_y2"] - seg["box_y1"]) ** 2) ** 0.5
     return {
-        "track_id": track_id, "team": _predominant_team(seg["team"]),
+        "track_id": track_id, "team": _nearest_known_team(team_index, track_id, team_lookup_t),
         "cx": float(((seg["box_x1"] + seg["box_x2"]) / 2).mean()),
         "cy": float(((seg["box_y1"] + seg["box_y2"]) / 2).mean()),
         "diag": float(diag.mean()),
@@ -236,14 +290,21 @@ def find_pose_collapse_candidates(player_time_df: pd.DataFrame) -> list[dict]:
     together they produced dozens of candidates per clip, including
     nonsensical same-team pairs and closing speeds up to tens of thousands
     of m/s, all from windows that happened to catch a tracking-ID-switch
-    artifact near an unrelated collapse."""
+    artifact near an unrelated collapse. Team lookups were later refined
+    again (2026-07-16) from "predominant team over the exact window" to
+    "nearest confidently-known team within TEAM_LOOKUP_WINDOW_S" -- see
+    that constant's comment for why: real contact is box overlap, which is
+    exactly when TeamColorAnchor abstains, so the exact window is often
+    entirely unclassified for a genuine collision."""
     df = player_time_df[player_time_df["cls"] == "player"]
-    runs = _collapse_runs(player_time_df)
+    team_index = _build_known_team_index(df)
+    runs = _collapse_runs(player_time_df, team_index)
     candidates = []
     seen_pairs = set()
     for run in runs:
         if run["team"] is None:
             continue
+        run_center = (run["start_time_s"] + run["end_time_s"]) / 2
         t0 = run["start_time_s"] - POSE_OVERLAP_TOLERANCE_S
         t1 = run["end_time_s"] + POSE_OVERLAP_TOLERANCE_S
         other_ids = df[
@@ -251,7 +312,17 @@ def find_pose_collapse_candidates(player_time_df: pd.DataFrame) -> list[dict]:
         ]["track_id"].unique()
 
         for other_id in other_ids:
-            other = _track_window_stats(df, other_id, t0, t1)
+            # Narrow window first (centered on the run's own timing, not the
+            # full +/-1s search window) so the other player's position isn't
+            # diluted by where they were well before/after the actual
+            # moment; only fall back to the broader window if they have no
+            # data at all that close (e.g. briefly occluded too).
+            other = _track_window_stats(
+                df, other_id, run_center - POSE_PROXIMITY_WINDOW_S, run_center + POSE_PROXIMITY_WINDOW_S,
+                team_index, run_center,
+            )
+            if other is None:
+                other = _track_window_stats(df, other_id, t0, t1, team_index, run_center)
             if other is None or other["team"] is None or other["team"] == run["team"]:
                 continue
             dist_px = math.hypot(run["cx"] - other["cx"], run["cy"] - other["cy"])
