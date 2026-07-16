@@ -59,6 +59,19 @@ POSE_COLLAPSE_RATIO = 0.6  # current aspect ratio must drop below this fraction 
 # enough to this threshold that a tight/wide framing could misfire; see the
 # validation entry in PROGRESS.md for the measured false-positive check.
 POSE_ABS_COLLAPSE_RATIO = 0.5
+# A single frame this far below normal is extreme enough to count as
+# sufficient evidence on its own, without needing POSE_COLLAPSE_MIN_FRAMES
+# consecutive frames -- added after finding the real Chelsea-Burnley
+# collapse (0.23) only ever showed up for exactly one frame before the
+# track was lost to occlusion, which the sustained-run requirement was
+# rejecting outright regardless of the pairing/threshold relaxations
+# (PROGRESS.md, 2026-07-15). 0.3 is chosen to sit clearly below
+# Chelsea-Burnley's 0.23 with margin, while staying clearly above the
+# extreme end (this is NOT calibrated against Southampton-Liverpool's 0.63
+# reading -- that value doesn't clear the *existing* 0.5 bar either, let
+# alone this stricter one; see the dev log for why that case needs a
+# different fix, not a lower threshold, and remains a genuine miss here).
+POSE_EXTREME_ABS_RATIO = 0.3
 POSE_COLLAPSE_MIN_FRAMES = 3  # must stay collapsed this many consecutive frames -- not a single noisy frame
 POSE_OVERLAP_TOLERANCE_S = 1.0  # a collapse and a nearby opponent count as "the same moment" within this gap
 POSE_PROXIMITY_BOX_DIAGONALS = 2.0  # "nearby" boxes, scaled by box size so it holds at any camera distance
@@ -75,7 +88,14 @@ def _distance_speed_candidates(player_time_df: pd.DataFrame) -> list[dict]:
         for i in range(len(rows)):
             for j in range(i + 1, len(rows)):
                 a, b = rows[i], rows[j]
-                if a["team"] == b["team"] or a["team"] is None or b["team"] is None:
+                # pd.isna, not `is None`: a DataFrame-sourced None can come back
+                # as float NaN after passing through pandas ops (confirmed via
+                # TeamColorAnchor's new None-producing path, 2026-07-16) --
+                # `a["team"] is None` silently misses that, and NaN != NaN means
+                # the `==` check above doesn't catch a NaN-vs-NaN "match" either,
+                # so two untrustworthy samples were slipping through as a valid
+                # opposing-team pair.
+                if a["team"] == b["team"] or pd.isna(a["team"]) or pd.isna(b["team"]):
                     continue
                 dist = ((a["x"] - b["x"]) ** 2 + (a["y"] - b["y"]) ** 2) ** 0.5
                 if dist > CONTACT_DIST_M:
@@ -100,9 +120,14 @@ def _distance_speed_candidates(player_time_df: pd.DataFrame) -> list[dict]:
 
 
 def _collapse_runs(player_time_df: pd.DataFrame) -> list[dict]:
-    """Per track, finds sustained aspect-ratio-collapse runs (a box going
-    tall-and-narrow -> short-and-wide for several consecutive frames --
-    falling, being tackled, ending up tangled on the ground)."""
+    """Per track, finds aspect-ratio-collapse runs (a box going
+    tall-and-narrow -> short-and-wide -- falling, being tackled, ending up
+    tangled on the ground). Tiered acceptance: a run needs
+    POSE_COLLAPSE_MIN_FRAMES consecutive collapsed frames to qualify UNLESS
+    at least one frame in it is extreme enough (POSE_EXTREME_ABS_RATIO) to
+    stand on its own -- a real collapse that's only ever observed for one
+    frame before the track is lost to occlusion (see module docstring)
+    would otherwise never qualify no matter how extreme that one frame is."""
     df = player_time_df[player_time_df["cls"] == "player"]
     if df.empty or "box_x1" not in df.columns:
         return []  # needs pixel boxes -- only the yolo backend carries these (see pipeline.py)
@@ -122,17 +147,22 @@ def _collapse_runs(player_time_df: pd.DataFrame) -> list[dict]:
         baseline = aspect.rolling(window=window, min_periods=min_periods).median().shift(1)
         relative_collapse = (aspect < POSE_COLLAPSE_RATIO * baseline).fillna(False)
         absolute_collapse = (aspect < POSE_ABS_COLLAPSE_RATIO).fillna(False)
+        extreme = (aspect < POSE_EXTREME_ABS_RATIO).fillna(False)
         collapsed = relative_collapse | absolute_collapse
 
-        start = None
+        start, has_extreme = None, False
         for i, is_collapsed in enumerate(collapsed):
-            if is_collapsed and start is None:
-                start = i
-            elif not is_collapsed and start is not None:
-                if i - start >= POSE_COLLAPSE_MIN_FRAMES:
+            if is_collapsed:
+                if start is None:
+                    start = i
+                    has_extreme = bool(extreme.iloc[i])
+                else:
+                    has_extreme = has_extreme or bool(extreme.iloc[i])
+            elif start is not None:
+                if has_extreme or i - start >= POSE_COLLAPSE_MIN_FRAMES:
                     runs.append(_run_dict(track_id, g, start, i - 1))
-                start = None
-        if start is not None and len(g) - start >= POSE_COLLAPSE_MIN_FRAMES:
+                start, has_extreme = None, False
+        if start is not None and (has_extreme or len(g) - start >= POSE_COLLAPSE_MIN_FRAMES):
             runs.append(_run_dict(track_id, g, start, len(g) - 1))
     return runs
 
