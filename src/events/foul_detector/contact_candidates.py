@@ -153,6 +153,16 @@ TORSO_FALL_MIN_FRAMES = 3
 # annotation-only for now.
 KEYPOINT_CONTACT_TRIGGER_TYPES = ("leg_contact", "hand_to_face", "elbow_to_body")
 
+# Final dedup pass (2026-07-17): real-footage validation of the keypoint-
+# contact trigger above found the same two players generating several
+# separate candidates 0.04-0.3s apart while one ongoing contest/tangle
+# played out (e.g. six on Chelsea-Burnley between t=17.12s and t=17.44s) --
+# genuinely one incident, not several distinct fouls. Chain-merges
+# consecutive-in-time candidates for the SAME pair (any trigger) within this
+# gap into a single representative event, applied once at the end of
+# find_contact_candidates, after the union of all four triggers.
+DEDUP_WINDOW_S = 0.5
+
 
 def _build_known_team_index(players: pd.DataFrame) -> dict:
     """Per track_id, the sorted (time_s, team) pairs for frames where the
@@ -529,9 +539,73 @@ def find_keypoint_contact_candidates(player_time_df: pd.DataFrame) -> list[dict]
             "track_id_b": c["track_id_b"], "team_b": c["team_b"],
             "location": c["location"],
             "closing_speed_mps": c["closing_speed_mps"],
+            "dist_frac_of_height": c["dist_frac_of_height"],
             "trigger": "keypoint_contact",
         })
     return sorted(candidates, key=lambda c: c["time_s"])
+
+
+def _merge_cluster(cluster: list[dict]) -> dict:
+    """Representative event for a group of same-pair candidates deemed to be
+    one ongoing contact (see DEDUP_WINDOW_S): earliest time, union of
+    triggers, the closest (minimum) dist_frac_of_height across the group if
+    any member has one, and closing speed -- preferring the minimum
+    PLAUSIBLE speed among the group (so one implausible-speed member doesn't
+    contaminate a merged event when a plausible reading exists elsewhere in
+    the same cluster), falling back to the group's own minimum otherwise.
+    Location is averaged across the cluster for a more representative
+    position than any single frame's."""
+    base = cluster[0]
+    triggers: list[str] = []
+    for c in cluster:
+        for t in c.get("triggers", []):
+            if t not in triggers:
+                triggers.append(t)
+
+    dist_fracs = [c["dist_frac_of_height"] for c in cluster if c.get("dist_frac_of_height") is not None]
+    plausible_speeds = [c["closing_speed_mps"] for c in cluster if c["closing_speed_mps"] <= MAX_CLOSING_SPEED_MPS]
+    closing_speed = min(plausible_speeds) if plausible_speeds else min(c["closing_speed_mps"] for c in cluster)
+
+    merged = {
+        "time_s": base["time_s"],
+        "track_id_a": base["track_id_a"], "team_a": base["team_a"],
+        "track_id_b": base["track_id_b"], "team_b": base["team_b"],
+        "location": (
+            sum(c["location"][0] for c in cluster) / len(cluster),
+            sum(c["location"][1] for c in cluster) / len(cluster),
+        ),
+        "closing_speed_mps": closing_speed,
+        "triggers": triggers,
+    }
+    if dist_fracs:
+        merged["dist_frac_of_height"] = min(dist_fracs)
+    return merged
+
+
+def _dedup_same_pair_candidates(candidates: list[dict]) -> list[dict]:
+    """Chain-merges candidates for the SAME two tracked players that fall
+    within DEDUP_WINDOW_S of each other (any trigger) into one representative
+    event, so a single ongoing contest isn't reported as several separate
+    foul events. Grouping by pair first means candidates for a DIFFERENT
+    pair active in the same window are never merged together, even if they
+    happen to be close in time."""
+    by_pair: dict[tuple, list[dict]] = {}
+    for c in candidates:
+        pair_key = tuple(sorted((c["track_id_a"], c["track_id_b"])))
+        by_pair.setdefault(pair_key, []).append(c)
+
+    deduped = []
+    for group in by_pair.values():
+        group.sort(key=lambda c: c["time_s"])
+        cluster = [group[0]]
+        for c in group[1:]:
+            if c["time_s"] - cluster[-1]["time_s"] <= DEDUP_WINDOW_S:
+                cluster.append(c)
+            else:
+                deduped.append(_merge_cluster(cluster))
+                cluster = [c]
+        deduped.append(_merge_cluster(cluster))
+    return sorted(deduped, key=lambda c: c["time_s"])
 
 
 def find_contact_candidates(player_time_df: pd.DataFrame) -> list[dict]:
@@ -543,7 +617,9 @@ def find_contact_candidates(player_time_df: pd.DataFrame) -> list[dict]:
     already flagged by an earlier one around the same time is merged into
     that same candidate (its name appended to the "triggers" list) rather
     than appended as a separate duplicate event for what is very likely
-    the same real contact."""
+    the same real contact. A final pass (`_dedup_same_pair_candidates`)
+    then chain-merges any remaining same-pair candidates that are still
+    close in time -- see DEDUP_WINDOW_S."""
     candidates = _distance_speed_candidates(player_time_df)
     for c in candidates:
         c["triggers"] = [c.pop("trigger")]
@@ -566,4 +642,5 @@ def find_contact_candidates(player_time_df: pd.DataFrame) -> list[dict]:
     _merge_in(find_torso_fall_candidates(player_time_df))
     _merge_in(find_keypoint_contact_candidates(player_time_df))
 
+    candidates = _dedup_same_pair_candidates(candidates)
     return sorted(candidates, key=lambda c: c["time_s"])

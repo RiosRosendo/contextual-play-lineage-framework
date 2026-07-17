@@ -21,6 +21,7 @@ event, not only ones that happen to precede a goal.
 from __future__ import annotations
 
 from src.assistant.retriever import get_retriever
+from src.events.foul_detector.contact_candidates import MAX_CLOSING_SPEED_MPS
 
 _QUERY_BY_CONTEXT = "foul careless reckless excessive force direct free kick"
 
@@ -70,6 +71,20 @@ _SEVERITY_FLOOR_BY_CONTACT_TYPE = {
     "elbow_to_body": "reckless",
 }
 
+# dist_frac_of_height (src/events/pose_signals.py: closest joint-to-joint
+# distance, as a fraction of the players' mean box height) is only ever
+# populated by the keypoint-contact trigger, and only ever within its own
+# trigger range [0, CONTACT_FRAC_OF_HEIGHT=0.2] -- a smaller value means the
+# contact point was closer/more direct relative to the players' own size.
+# Used ONLY as a severity fallback when closing_speed_mps is implausible
+# (see assess_foul_candidate) and no contact-type floor applies; a purely
+# geometric signal, not subject to the tracking-corruption failure mode that
+# makes closing speed untrustworthy during violent contact. Thresholds are a
+# deliberately round split of that [0, 0.2] range, the same illustrative
+# spirit as CARELESS/RECKLESS_MAX_CLOSING_SPEED_MPS above.
+DIST_FRAC_EXCESSIVE_MAX = 0.07
+DIST_FRAC_RECKLESS_MAX = 0.14
+
 
 def _severity_for(closing_speed_mps: float) -> str:
     if closing_speed_mps <= CARELESS_MAX_CLOSING_SPEED_MPS:
@@ -79,15 +94,30 @@ def _severity_for(closing_speed_mps: float) -> str:
     return "excessive_force"
 
 
-def _apply_contact_type_floor(severity: str, contact_types: list[str]) -> tuple[str, bool]:
-    """Raises `severity` to the highest floor implied by any identified
-    contact type, if that floor exceeds the closing-speed-derived severity.
-    Returns (severity, was_raised)."""
+def _severity_from_dist_frac(dist_frac_of_height: float) -> str:
+    if dist_frac_of_height <= DIST_FRAC_EXCESSIVE_MAX:
+        return "excessive_force"
+    if dist_frac_of_height <= DIST_FRAC_RECKLESS_MAX:
+        return "reckless"
+    return "careless"
+
+
+def _contact_type_floor(contact_types: list[str]) -> str | None:
+    """The highest severity floor implied by any identified contact type, or
+    None if none of them carry one (see _SEVERITY_FLOOR_BY_CONTACT_TYPE)."""
     floor = None
     for ctype in contact_types:
         candidate = _SEVERITY_FLOOR_BY_CONTACT_TYPE.get(ctype)
         if candidate and (floor is None or _SEVERITY_ORDER.index(candidate) > _SEVERITY_ORDER.index(floor)):
             floor = candidate
+    return floor
+
+
+def _apply_contact_type_floor(severity: str, contact_types: list[str]) -> tuple[str, bool]:
+    """Raises `severity` to the highest floor implied by any identified
+    contact type, if that floor exceeds the closing-speed-derived severity.
+    Returns (severity, was_raised)."""
+    floor = _contact_type_floor(contact_types)
     if floor is not None and _SEVERITY_ORDER.index(floor) > _SEVERITY_ORDER.index(severity):
         return floor, True
     return severity, False
@@ -121,11 +151,38 @@ def assess_foul_candidate(event: dict) -> dict:
     (striking / holding / tackling) is retrieved separately so the
     explanation can name which Law 12 offense the contact resembles, not
     just its severity tier. Events with no contact-type annotation (or an
-    empty one) fall back to closing-speed-only reasoning, unchanged."""
+    empty one) fall back to closing-speed-only reasoning, unchanged.
+
+    `closing_speed_mps` is NOT trusted for severity above
+    MAX_CLOSING_SPEED_MPS (contact_candidates.py's own physical-plausibility
+    cap): the keypoint-contact trigger deliberately lets candidates through
+    at implausible speeds (real contact corrupts the box-derived speed
+    estimate, the same failure already on record for pose-collapse/
+    torso-fall), but that same corrupted number must not then drive the
+    severity verdict. Above the cap, severity instead falls back to a
+    hierarchy: the contact-type floor if one applies, else
+    `dist_frac_of_height` (a purely geometric signal, unaffected by speed
+    corruption) if the event carries one, else a conservative "careless"
+    default (disclosed via `severity_source`, not silently guessed)."""
     retriever = get_retriever()
     contact_types = event.get("contact_types") or []
-    severity = _severity_for(event["closing_speed_mps"])
-    severity, raised_by_contact_type = _apply_contact_type_floor(severity, contact_types)
+    closing_speed = event["closing_speed_mps"]
+    speed_plausible = closing_speed <= MAX_CLOSING_SPEED_MPS
+
+    if speed_plausible:
+        severity = _severity_for(closing_speed)
+        severity, raised_by_contact_type = _apply_contact_type_floor(severity, contact_types)
+        severity_source = "contact_type_floor" if raised_by_contact_type else "closing_speed"
+    else:
+        floor = _contact_type_floor(contact_types)
+        dist_frac = event.get("dist_frac_of_height")
+        if floor is not None:
+            severity, severity_source = floor, "contact_type_floor"
+        elif dist_frac is not None:
+            severity, severity_source = _severity_from_dist_frac(dist_frac), "dist_frac_of_height"
+        else:
+            severity, severity_source = "careless", "unresolved_implausible_speed"
+
     excerpt = retriever.retrieve(_SEVERITY_QUERY[severity], k=1)[0]
 
     contact_excerpt = None
@@ -136,7 +193,8 @@ def assess_foul_candidate(event: dict) -> dict:
             break
 
     return {"verdict": "foul", "severity": severity, "recommended_card": _SEVERITY_CARD[severity],
-            "contact_types": contact_types, "severity_raised_by_contact_type": raised_by_contact_type,
+            "contact_types": contact_types, "severity_source": severity_source,
+            "closing_speed_plausible": speed_plausible,
             "excerpt": excerpt, "contact_excerpt": contact_excerpt, "event": event}
 
 
@@ -146,10 +204,14 @@ def explain_foul_candidate(event: dict) -> str:
     `explain_review_alert`."""
     assessment = assess_foul_candidate(event)
     excerpt = assessment["excerpt"]
+    speed_note = "" if assessment["closing_speed_plausible"] else (
+        f" (exceeds the {MAX_CLOSING_SPEED_MPS:.0f} m/s plausibility cap -- "
+        f"not used for severity, see below)"
+    )
     header = (
         f"Contact at t={event['time_s']:.2f}s between track #{event['track_id_a']} "
         f"({event['team_a']}) and track #{event['track_id_b']} ({event['team_b']}), "
-        f"closing speed {event['closing_speed_mps']:.1f} m/s "
+        f"closing speed {event['closing_speed_mps']:.1f} m/s{speed_note} "
         f"(illustrative model confidence: {event['foul_probability']:.2f}, classifier untrained)."
     )
     if assessment["verdict"] == "no_foul":
@@ -163,15 +225,28 @@ def explain_foul_candidate(event: dict) -> str:
     if contact_types:
         labels = ", ".join(_CONTACT_TYPE_LABEL.get(c, c) for c in contact_types)
         contact_line = f"Contact type(s) identified at the keypoint level: {labels}."
-        if assessment["severity_raised_by_contact_type"]:
-            contact_line += (
-                " Severity was raised on this basis: contact to the head/face is treated as "
-                "inherently dangerous regardless of closing speed, so it cannot be judged 'careless' "
-                "on speed alone."
-            )
     else:
-        contact_line = ("Contact type(s) identified at the keypoint level: none resolved -- "
-                         "severity is based on closing speed alone.")
+        contact_line = "Contact type(s) identified at the keypoint level: none resolved."
+
+    severity_source = assessment["severity_source"]
+    if severity_source == "contact_type_floor":
+        contact_line += (
+            " Severity set by contact type: contact to the head/face is treated as inherently "
+            "dangerous regardless of closing speed, so it cannot be judged 'careless' on speed alone."
+        )
+    elif severity_source == "dist_frac_of_height":
+        contact_line += (
+            " Closing speed was not usable here (see above), so severity falls back to how close "
+            "the contact point was, relative to the players' own size -- a purely geometric signal, "
+            "not a biomechanics-based force estimate."
+        )
+    elif severity_source == "unresolved_implausible_speed":
+        contact_line += (
+            " Closing speed was not usable here and no other severity signal was available, so "
+            "severity defaults to the most conservative tier ('careless') rather than guessing."
+        )
+    else:
+        contact_line += " Severity is based on closing speed alone."
 
     grounding = f"Grounding ({excerpt['law']} -- {excerpt['title']}):\n  \"{excerpt['text']}\""
     contact_excerpt = assessment["contact_excerpt"]

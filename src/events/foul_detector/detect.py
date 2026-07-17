@@ -42,6 +42,7 @@ def run_foul_detection(player_time_df: pd.DataFrame) -> list[dict]:
             "is_foul": prob > FOUL_PROBABILITY_THRESHOLD,
             "is_flagged": False,
             "triggers": c.get("triggers", ["distance_speed"]),
+            "dist_frac_of_height": c.get("dist_frac_of_height"),
         })
     return events
 
