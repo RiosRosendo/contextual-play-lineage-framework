@@ -57,14 +57,31 @@ class TeamColorAnchor:
     """Persists team-color identity across frames and shots: "team_a"
     keeps meaning the same real jersey color throughout a whole clip,
     instead of being re-clustered blind every call the way `assign_teams`
-    is. Bootstraps its 2 reference colors via k-means the first time it
-    sees enough players, then classifies every subsequent call by nearest
-    reference centroid (not by re-clustering), with slow exponential
-    adaptation so gradual lighting drift doesn't require a fresh anchor.
-    Deliberately does NOT reset on a scene cut -- that's the point: the
-    caller creates one instance for a whole clip and keeps using it across
-    shots, which is what actually fixes the bug described in
-    `assign_teams`'s docstring.
+    is. Bootstraps 3 reference colors via k-means (2 teams + referee, see
+    below) the first time it sees enough players, then classifies every
+    subsequent call by nearest reference centroid (not by re-clustering),
+    with slow exponential adaptation so gradual lighting drift doesn't
+    require a fresh anchor. Deliberately does NOT reset on a scene cut --
+    that's the point: the caller creates one instance for a whole clip and
+    keeps using it across shots, which is what actually fixes the bug
+    described in `assign_teams`'s docstring.
+
+    Referee discrimination (2026-07-17): bootstraps with k=3 clusters
+    instead of 2 -- a referee's kit is conventionally a solid color
+    distinct from both teams' (the classic reason referees wear black or a
+    bright singleton color), so it should separate out as its own cluster
+    the same way the two team kits do. Since color alone doesn't say
+    *which* of the 3 clusters is the referee (a dark team kit looks the
+    same as a dark referee kit to k-means), cluster POPULATION size is
+    used to decide: the referee is one person against ~10-11 per team, so
+    whichever of the 3 bootstrap clusters has the fewest members is
+    labeled referee, and the other two become team_a/team_b as before.
+    This is a real, disclosed assumption -- it fails if the bootstrap
+    frame doesn't have enough of a mixed sample (e.g. a tight shot with
+    only 2-3 people, or a frame where the referee happens to be one of
+    several similarly-dark-kitted outfield players) -- but it needs no new
+    model and reuses the exact color-clustering infrastructure already
+    validated for team identity.
 
     Real-footage validation (the dev log, 2026-07-15) found a second bug
     this class needs to guard against: when two players' boxes overlap
@@ -83,13 +100,16 @@ class TeamColorAnchor:
     and referee rows already carry it), so an honest "don't know" for one
     frame is a normal case, not a new failure mode for callers to handle."""
 
+    MIN_BOOTSTRAP_SAMPLES = 4  # need enough people to safely split into 2 teams + a referee singleton
+
     def __init__(self, ema_alpha: float = 0.05, min_separation_ratio: float = 1.2,
                  overlap_iou_threshold: float = 0.1):
-        self.centroids: np.ndarray | None = None  # shape (2, 3), BGR
+        self.centroids: np.ndarray | None = None  # shape (3, 3), BGR: [team_a, team_b, referee]
         self.ema_alpha = ema_alpha
-        # Nearest centroid must be at least this much closer than the other
-        # for a sample to count as confidently classified -- 1.2 means the
-        # farther centroid must be >=20% more distant than the nearest one.
+        # Nearest centroid must be at least this much closer than the next-
+        # nearest for a sample to count as confidently classified -- 1.2
+        # means the next-nearest must be >=20% more distant than the
+        # nearest one.
         self.min_separation_ratio = min_separation_ratio
         self.overlap_iou_threshold = overlap_iou_threshold
 
@@ -107,7 +127,12 @@ class TeamColorAnchor:
         """`boxes` (same order/length as `torso_colors`, each an (x1,y1,x2,y2)
         tuple) is optional but should be passed whenever available -- it's
         what makes the occlusion check possible. Without it, only the
-        minimum-separation check applies."""
+        minimum-separation check applies.
+
+        Returns, per input color: 0 (team_a), 1 (team_b), 2 (referee), or
+        None -- either not enough trusted samples exist yet to bootstrap
+        (fewer than MIN_BOOTSTRAP_SAMPLES), or this specific sample isn't
+        trustworthy (ambiguous or occluded, see the class docstring)."""
         if not torso_colors:
             return []
         x = np.stack(torso_colors)
@@ -115,13 +140,21 @@ class TeamColorAnchor:
         occluded = self._occluded_mask(boxes, n)
 
         if self.centroids is None:
-            if n < 2:
-                return [0] * n
             trusted = x[~occluded] if np.any(~occluded) else x
-            labels_trusted = KMeans(n_clusters=2, n_init=4, random_state=0).fit_predict(trusted)
+            if len(trusted) < self.MIN_BOOTSTRAP_SAMPLES:
+                return [None] * n  # not enough people yet to safely separate 2 teams + a referee
+            labels_trusted = KMeans(n_clusters=3, n_init=4, random_state=0).fit_predict(trusted)
+            counts = [int(np.sum(labels_trusted == k)) for k in range(3)]
+            # The referee is 1 person against ~10-11 per team in a typical
+            # bootstrap sample -- color alone can't say *which* cluster is
+            # the referee (a dark team kit clusters the same as a dark
+            # referee kit), but population size can (see class docstring).
+            referee_cluster = int(np.argmin(counts))
+            team_clusters = [k for k in range(3) if k != referee_cluster]
             self.centroids = np.array([
-                trusted[labels_trusted == k].mean(axis=0) if np.any(labels_trusted == k) else trusted.mean(axis=0)
-                for k in (0, 1)
+                trusted[labels_trusted == team_clusters[0]].mean(axis=0),
+                trusted[labels_trusted == team_clusters[1]].mean(axis=0),
+                trusted[labels_trusted == referee_cluster].mean(axis=0),
             ])
 
         # Re-derived from the (possibly just-bootstrapped) centroids either
@@ -133,7 +166,7 @@ class TeamColorAnchor:
         trust_sample = confident & ~occluded
         nearest = dists.argmin(axis=1)
 
-        for k in (0, 1):
+        for k in range(3):
             assigned = x[trust_sample & (nearest == k)]
             if len(assigned):
                 self.centroids[k] = (1 - self.ema_alpha) * self.centroids[k] + self.ema_alpha * assigned.mean(axis=0)

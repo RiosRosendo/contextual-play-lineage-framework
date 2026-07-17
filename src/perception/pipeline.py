@@ -18,6 +18,16 @@ from src.perception.calibration import PitchCalibrator
 
 _SHOT_TRACK_ID_STRIDE = 100_000  # keeps track_ids globally unique across shots
 
+# Crowd/sideline filter (2026-07-17): a "person" detection whose calibrated
+# real-world position falls well outside the actual pitch is not a player at
+# all -- it's a spectator, bench/technical-area personnel, or a ball boy
+# that the detector can't otherwise tell apart from a player. Reuses the
+# calibration homography already computed for every row rather than a new
+# model. Margin is generous enough to keep the technical area/dugouts
+# (players warming up, staff) without accepting the stands, which in a real
+# broadcast's projected pitch coordinates sit well beyond this.
+SIDELINE_MARGIN_M = 5.0
+
 
 def _run_color_backend(video_path: str, calibrator: PitchCalibrator) -> pd.DataFrame:
     cap = cv2.VideoCapture(video_path)
@@ -95,14 +105,21 @@ def _run_yolo_backend_shot(video_path: str, calibrator: PitchCalibrator, fps: fl
         for b in boxes:
             if b.cls == "person":
                 label = team_labels[person_i]
-                team = None if label is None else f"team_{'a' if label == 0 else 'b'}"
                 keypoints = keypoints_per_person[person_i]
                 person_i += 1
+                if label == 2:
+                    # Referee (see TeamColorAnchor): a distinct tracker
+                    # class, not "person"/team_a/team_b, so it's excluded
+                    # from every downstream player-only signal by
+                    # construction rather than by an extra filter.
+                    det_cls, team = "referee", None
+                else:
+                    det_cls = "person"
+                    team = None if label is None else f"team_{'a' if label == 0 else 'b'}"
             else:
-                team = None
-                keypoints = None
+                det_cls, team, keypoints = b.cls, None, None
             det_dicts.append({
-                "cls": b.cls, "team": team, "box": (b.x1, b.y1, b.x2, b.y2), "conf": b.conf,
+                "cls": det_cls, "team": team, "box": (b.x1, b.y1, b.x2, b.y2), "conf": b.conf,
                 "keypoints": keypoints,
             })
 
@@ -110,9 +127,19 @@ def _run_yolo_backend_shot(video_path: str, calibrator: PitchCalibrator, fps: fl
         for t in tracked:
             cx, cy = (t["box"][0] + t["box"][2]) / 2, (t["box"][1] + t["box"][3]) / 2
             x_m, y_m = calibrator.pixel_to_pitch(cx, cy)
+            cls = {"person": "player", "referee": "referee", "ball": "ball"}.get(t["cls"], t["cls"])
+            if cls == "player" and not (
+                -SIDELINE_MARGIN_M <= x_m <= pitch_calibration_cv.PITCH_LENGTH_M + SIDELINE_MARGIN_M
+                and -SIDELINE_MARGIN_M <= y_m <= pitch_calibration_cv.PITCH_WIDTH_M + SIDELINE_MARGIN_M
+            ):
+                # Calibrated position falls well outside the real pitch --
+                # not a player (see SIDELINE_MARGIN_M above). Reclassified
+                # rather than dropped, so this is auditable the same way
+                # calib_source already is.
+                cls = "non_player"
             row = {
                 "frame": frame_idx, "time_s": frame_idx / fps, "track_id": t["track_id"] + track_id_offset,
-                "cls": "player" if t["cls"] == "person" else "ball", "team": t["team"],
+                "cls": cls, "team": t["team"],
                 "x": x_m, "y": y_m, "conf": t["conf"], "calib_source": calib_source,
                 "box_x1": t["box"][0], "box_y1": t["box"][1], "box_x2": t["box"][2], "box_y2": t["box"][3],
             }
