@@ -39,6 +39,36 @@ _SEVERITY_QUERY = {
     "excessive_force": "excessive force far more than necessary sent off red card",
 }
 _SEVERITY_CARD = {"careless": "none", "reckless": "yellow", "excessive_force": "red"}
+_SEVERITY_ORDER = ("careless", "reckless", "excessive_force")
+
+# Human-readable label and offense-category retrieval query per keypoint
+# contact type (src/events/pose_signals.py's CONTACT_RULES), so the verdict
+# can name and ground *which* Law 12 offense the contact resembles, not
+# just how fast the players were closing.
+_CONTACT_TYPE_LABEL = {
+    "hand_to_face": "a hand/arm strike to the head or face",
+    "elbow_to_body": "an elbow strike to the body",
+    "shirt_pull": "holding (sustained shirt-pull)",
+    "leg_contact": "a leg/foot challenge",
+}
+_CONTACT_TYPE_QUERY = {
+    "hand_to_face": "striking or attempting to strike",
+    "elbow_to_body": "striking or attempting to strike",
+    "shirt_pull": "holding an opponent",
+    "leg_contact": "tackling or challenging tripping kicking",
+}
+
+# Contact landing on the head/face is treated by Law 12 as inherently
+# dangerous regardless of how fast the players were closing (a slow arm can
+# still injure) -- "excessive force"/"reckless" is about danger and force,
+# not velocity alone. These two contact types set a severity FLOOR: the
+# closing-speed proxy can still escalate a hand/elbow strike above this
+# floor (a very high closing speed still means excessive force), but never
+# reduce it below "reckless" purely because the players were moving slowly.
+_SEVERITY_FLOOR_BY_CONTACT_TYPE = {
+    "hand_to_face": "reckless",
+    "elbow_to_body": "reckless",
+}
 
 
 def _severity_for(closing_speed_mps: float) -> str:
@@ -47,6 +77,20 @@ def _severity_for(closing_speed_mps: float) -> str:
     if closing_speed_mps <= RECKLESS_MAX_CLOSING_SPEED_MPS:
         return "reckless"
     return "excessive_force"
+
+
+def _apply_contact_type_floor(severity: str, contact_types: list[str]) -> tuple[str, bool]:
+    """Raises `severity` to the highest floor implied by any identified
+    contact type, if that floor exceeds the closing-speed-derived severity.
+    Returns (severity, was_raised)."""
+    floor = None
+    for ctype in contact_types:
+        candidate = _SEVERITY_FLOOR_BY_CONTACT_TYPE.get(ctype)
+        if candidate and (floor is None or _SEVERITY_ORDER.index(candidate) > _SEVERITY_ORDER.index(floor)):
+            floor = candidate
+    if floor is not None and _SEVERITY_ORDER.index(floor) > _SEVERITY_ORDER.index(severity):
+        return floor, True
+    return severity, False
 
 
 def assess_foul_candidate(event: dict) -> dict:
@@ -67,12 +111,33 @@ def assess_foul_candidate(event: dict) -> dict:
     threshold with no exceptions -- a property of random initialization,
     not evidence none of the contacts were fouls). Once the classifier is
     trained (the internal task list), gating the verdict on `is_foul` becomes meaningful
-    and should replace this."""
+    and should replace this.
+
+    If the event carries a `contact_types` annotation (from
+    src/events/pose_signals.annotate_foul_contact_types), it is folded into
+    the severity judgment alongside closing speed: a hand-to-face or
+    elbow-to-body contact sets a "reckless" floor regardless of speed (see
+    _SEVERITY_FLOOR_BY_CONTACT_TYPE), and the specific offense category
+    (striking / holding / tackling) is retrieved separately so the
+    explanation can name which Law 12 offense the contact resembles, not
+    just its severity tier. Events with no contact-type annotation (or an
+    empty one) fall back to closing-speed-only reasoning, unchanged."""
     retriever = get_retriever()
+    contact_types = event.get("contact_types") or []
     severity = _severity_for(event["closing_speed_mps"])
+    severity, raised_by_contact_type = _apply_contact_type_floor(severity, contact_types)
     excerpt = retriever.retrieve(_SEVERITY_QUERY[severity], k=1)[0]
+
+    contact_excerpt = None
+    for ctype in contact_types:
+        query = _CONTACT_TYPE_QUERY.get(ctype)
+        if query is not None:
+            contact_excerpt = retriever.retrieve(query, k=1)[0]
+            break
+
     return {"verdict": "foul", "severity": severity, "recommended_card": _SEVERITY_CARD[severity],
-            "excerpt": excerpt, "event": event}
+            "contact_types": contact_types, "severity_raised_by_contact_type": raised_by_contact_type,
+            "excerpt": excerpt, "contact_excerpt": contact_excerpt, "event": event}
 
 
 def explain_foul_candidate(event: dict) -> str:
@@ -94,14 +159,35 @@ def explain_foul_candidate(event: dict) -> str:
                       "red": "red card (sent off)"}[assessment["recommended_card"]]
         verdict_line = f"VERDICT: foul, severity '{assessment['severity']}' -> recommended sanction: {card_label}."
 
+    contact_types = assessment["contact_types"]
+    if contact_types:
+        labels = ", ".join(_CONTACT_TYPE_LABEL.get(c, c) for c in contact_types)
+        contact_line = f"Contact type(s) identified at the keypoint level: {labels}."
+        if assessment["severity_raised_by_contact_type"]:
+            contact_line += (
+                " Severity was raised on this basis: contact to the head/face is treated as "
+                "inherently dangerous regardless of closing speed, so it cannot be judged 'careless' "
+                "on speed alone."
+            )
+    else:
+        contact_line = ("Contact type(s) identified at the keypoint level: none resolved -- "
+                         "severity is based on closing speed alone.")
+
+    grounding = f"Grounding ({excerpt['law']} -- {excerpt['title']}):\n  \"{excerpt['text']}\""
+    contact_excerpt = assessment["contact_excerpt"]
+    if contact_excerpt is not None and contact_excerpt["id"] != excerpt["id"]:
+        grounding += (
+            f"\n\nOffense-category grounding ({contact_excerpt['law']} -- {contact_excerpt['title']}):\n"
+            f"  \"{contact_excerpt['text']}\""
+        )
+
     return (
-        f"{verdict_line}\n{header}\n\n"
-        f"Grounding ({excerpt['law']} -- {excerpt['title']}):\n"
-        f"  \"{excerpt['text']}\"\n\n"
-        f"Note: severity is a simplified closing-speed proxy for this skeleton "
-        f"(the project spec section 3), not a biomechanics-based judgment, and the excerpt "
-        f"above is a paraphrased summary, not verbatim official IFAB text -- see "
-        f"src/assistant/ifab_corpus.py."
+        f"{verdict_line}\n{header}\n{contact_line}\n\n"
+        f"{grounding}\n\n"
+        f"Note: severity combines a simplified closing-speed proxy (the project spec section 3) "
+        f"with the identified contact type where available -- neither is a biomechanics-based "
+        f"judgment, and the excerpts above are paraphrased summaries, not verbatim official IFAB "
+        f"text -- see src/assistant/ifab_corpus.py."
     )
 
 

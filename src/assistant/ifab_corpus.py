@@ -19,7 +19,7 @@ IFAB_EXCERPTS = [
             "offenses against an opponent in a manner considered by the referee to be "
             "careless, reckless, or using excessive force: kicking or attempting to "
             "kick, tripping or attempting to trip, jumping at, charging, striking or "
-            "attempting to strike, pushing, tackling or challenging."
+            "attempting to strike, pushing, holding, tackling or challenging."
         ),
     },
     {
