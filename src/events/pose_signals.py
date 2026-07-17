@@ -156,6 +156,12 @@ def contact_type_events(player_time_df: pd.DataFrame) -> list[dict]:
                         "track_id_b": b["track_id"], "team_b": team_b,
                         "min_dist_px": streak["min_dist"],
                         "dist_frac_of_height": streak["min_dist"] / mean_h,
+                        # Carried through so contact_candidates.py can promote
+                        # a contact event directly into a foul candidate
+                        # (find_keypoint_contact_candidates) without a
+                        # separate position/speed lookup.
+                        "location": ((a["x"] + b["x"]) / 2, (a["y"] + b["y"]) / 2),
+                        "closing_speed_mps": float(a.get("speed_mps") or 0.0) + float(b.get("speed_mps") or 0.0),
                     })
     return sorted(events, key=lambda e: e["time_s"])
 

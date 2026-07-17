@@ -14,9 +14,18 @@ foul being clearly visible on inspection -- players tangled on the ground,
 a standing tackle, a player down. A falling/tackled/tangled player's
 tracked box collapses from tall-and-narrow to short-and-wide; this is a
 signal already sitting in the tracked box geometry, independent of whether
-the distance/speed gate also fires. `find_contact_candidates` merges both
+the distance/speed gate also fires. `find_contact_candidates` merges all
 triggers' output rather than loosening the original gate, which is kept
 exactly as it was.
+
+A fourth trigger (`find_keypoint_contact_candidates`, 2026-07-16) promotes
+real joint-to-joint contact from the dual-pass pose skeleton
+(src/events/pose_signals.py) directly into foul candidates, instead of only
+ever annotating a candidate some other trigger already found. This closed
+a real gap: on Swansea-Man Utd and Chelsea-Burnley, none of the three
+triggers above produced any candidate at all, so the correctly-detected
+real leg_contact/hand_to_face signals had no live foul_candidate to attach
+to and never reached Module A or Module C.
 """
 from __future__ import annotations
 
@@ -128,6 +137,21 @@ TORSO_KEYPOINT_CONF_MIN = 0.3
 TORSO_ANGLE_FALL_DEG = 60.0  # sustained-run threshold
 TORSO_ANGLE_EXTREME_DEG = 70.0  # single-frame threshold (same tiered logic as POSE_EXTREME_ABS_RATIO)
 TORSO_FALL_MIN_FRAMES = 3
+
+# Keypoint-contact trigger: promotes src/events/pose_signals.contact_type_events
+# (joint-to-joint proximity between opposing players -- hand_to_face,
+# elbow_to_body, shirt_pull, leg_contact) directly into first-class foul
+# candidates, alongside the box-geometry triggers above. Motivation (the dev
+# log, 2026-07-16): those real contact signals were already being detected
+# correctly at the keypoint level, but were stranded in an isolated report --
+# `annotate_foul_contact_types` only ever *annotates* an existing candidate,
+# so on clips where none of the box-geometry triggers fired at all (confirmed
+# on both Swansea-Man Utd and Chelsea-Burnley), the real leg_contact/
+# hand_to_face signal never reached a live foul_candidate/foul event, and
+# therefore never reached Module A or Module C. shirt_pull is deliberately
+# excluded here (not part of what was asked to be wired in) -- it stays
+# annotation-only for now.
+KEYPOINT_CONTACT_TRIGGER_TYPES = ("leg_contact", "hand_to_face", "elbow_to_body")
 
 
 def _build_known_team_index(players: pd.DataFrame) -> dict:
@@ -469,15 +493,57 @@ def _pair_runs_with_opponents(df: pd.DataFrame, team_index: dict, runs: list[dic
     return sorted(candidates, key=lambda c: c["time_s"])
 
 
+def find_keypoint_contact_candidates(player_time_df: pd.DataFrame) -> list[dict]:
+    """Promotes real joint-to-joint contact (src/events/pose_signals.
+    contact_type_events) into first-class foul candidates -- see
+    KEYPOINT_CONTACT_TRIGGER_TYPES's comment for why this exists.
+
+    Deliberately does NOT apply MAX_CLOSING_SPEED_MPS, unlike every trigger
+    above: that cap exists to reject candidates whose only evidence of
+    contact is an implausible closing speed (a tracking-ID-switch artifact
+    masquerading as a collision). Here, the evidence of contact is direct
+    joint-to-joint proximity -- a strictly stronger signal than box
+    geometry or speed -- so a genuine contact confirmed at the keypoint
+    level should not be discarded just because the same violent event also
+    corrupted the derived speed estimate. That was confirmed to be exactly
+    what already blocks the pose-collapse and torso-fall triggers on
+    Chelsea-Burnley (the dev log, 2026-07-16); repeating the same cap here
+    would reproduce the identical failure for the one trigger meant to
+    route around it. closing_speed_mps is still computed and carried
+    through (for Module C's severity reasoning), it just isn't a gate."""
+    from src.events import pose_signals  # local import: pose_signals imports team-lookup helpers from this module
+
+    contacts = pose_signals.contact_type_events(player_time_df)
+    candidates = []
+    last_flagged_t: dict = {}
+    for c in contacts:
+        if c["contact_type"] not in KEYPOINT_CONTACT_TRIGGER_TYPES:
+            continue
+        pair_key = tuple(sorted((c["track_id_a"], c["track_id_b"])))
+        if c["time_s"] - last_flagged_t.get(pair_key, -999) < MIN_GAP_S:
+            continue
+        last_flagged_t[pair_key] = c["time_s"]
+        candidates.append({
+            "time_s": c["time_s"],
+            "track_id_a": c["track_id_a"], "team_a": c["team_a"],
+            "track_id_b": c["track_id_b"], "team_b": c["team_b"],
+            "location": c["location"],
+            "closing_speed_mps": c["closing_speed_mps"],
+            "trigger": "keypoint_contact",
+        })
+    return sorted(candidates, key=lambda c: c["time_s"])
+
+
 def find_contact_candidates(player_time_df: pd.DataFrame) -> list[dict]:
-    """Union of three independent triggers: the original distance+speed
+    """Union of four independent triggers: the original distance+speed
     gate (unchanged), the box-aspect-ratio pose-collapse gate (see
-    `find_pose_collapse_candidates`), and the torso-angle fall gate (see
-    `find_torso_fall_candidates`). A later trigger's hit for a pair already
-    flagged by an earlier one around the same time is merged into that
-    same candidate (its name appended to the "triggers" list) rather than
-    appended as a separate duplicate event for what is very likely the
-    same real contact."""
+    `find_pose_collapse_candidates`), the torso-angle fall gate (see
+    `find_torso_fall_candidates`), and the keypoint-contact gate (see
+    `find_keypoint_contact_candidates`). A later trigger's hit for a pair
+    already flagged by an earlier one around the same time is merged into
+    that same candidate (its name appended to the "triggers" list) rather
+    than appended as a separate duplicate event for what is very likely
+    the same real contact."""
     candidates = _distance_speed_candidates(player_time_df)
     for c in candidates:
         c["triggers"] = [c.pop("trigger")]
@@ -498,5 +564,6 @@ def find_contact_candidates(player_time_df: pd.DataFrame) -> list[dict]:
 
     _merge_in(find_pose_collapse_candidates(player_time_df))
     _merge_in(find_torso_fall_candidates(player_time_df))
+    _merge_in(find_keypoint_contact_candidates(player_time_df))
 
     return sorted(candidates, key=lambda c: c["time_s"])
