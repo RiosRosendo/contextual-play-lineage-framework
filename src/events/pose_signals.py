@@ -210,12 +210,21 @@ def handball_events(player_time_df: pd.DataFrame) -> list[dict]:
 
 
 def annotate_foul_contact_types(foul_events: list[dict], contact_events: list[dict],
-                                 window_s: float = 1.0) -> None:
+                                 window_s: float = 0.2) -> None:
     """Attaches a `contact_types` list to each foul event: the distinct
     keypoint-level contact types observed between the same two tracks
     within +/-window_s of the foul. In-place; events with no matching
     contact get an empty list (an honest "boxes were close but no
-    joint-level contact was resolved"), never a guess."""
+    joint-level contact was resolved"), never a guess.
+
+    window_s was 1.0 originally; narrowed to 0.2 (2026-07-17), roughly
+    matching real contact duration. Real-footage validation found the wider
+    window pulled in incidental nearby contact -- elbow_to_body in
+    particular fires often during ordinary proximity play, not just at the
+    actual foul instant -- so almost every candidate ended up carrying a
+    severity-flooring contact type regardless of whether it was genuinely
+    part of the same incident, pushing Module C's severity output to a
+    uniform "reckless" instead of a plausible mix."""
     for foul in foul_events:
         pair = {foul.get("track_id_a"), foul.get("track_id_b")}
         types = {
