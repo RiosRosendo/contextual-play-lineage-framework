@@ -109,6 +109,26 @@ TEAM_LOOKUP_WINDOW_S = 1.0
 # player.
 POSE_PROXIMITY_WINDOW_S = 0.3
 
+# Torso-angle fall detector: a purpose-built "is this player down" signal
+# using the dual-pass pose skeleton (src/perception/pose_estimator.py)
+# instead of box aspect ratio -- more direct, since it measures body
+# orientation rather than inferring it from box shape (which a jump or a
+# kick can also distort; see POSE_MIN_VERTICAL_DROP_RATIO above). Reuses
+# the same pairing/proximity/speed-check machinery as the pose-collapse
+# trigger (_pair_runs_with_opponents) -- only how a "run" is detected
+# differs. Added 2026-07-16; validated once against the two known-hard
+# cases (Chelsea-Burnley, Man City-Watford) per instruction, not iterated
+# further regardless of outcome -- see the dev log for the result.
+TORSO_KEYPOINT_CONF_MIN = 0.3
+# Angle of the shoulder-midpoint -> hip-midpoint vector from vertical (0
+# deg standing upright, 90 deg lying flat). The earlier per-frame
+# exploration (notebooks/explore_pose_estimation.py) measured a sustained
+# 74-81 deg reading across ~9 consecutive frames on Chelsea-Burnley's real
+# fall -- comfortably above both bars below, with margin.
+TORSO_ANGLE_FALL_DEG = 60.0  # sustained-run threshold
+TORSO_ANGLE_EXTREME_DEG = 70.0  # single-frame threshold (same tiered logic as POSE_EXTREME_ABS_RATIO)
+TORSO_FALL_MIN_FRAMES = 3
+
 
 def _build_known_team_index(players: pd.DataFrame) -> dict:
     """Per track_id, the sorted (time_s, team) pairs for frames where the
@@ -255,6 +275,57 @@ def _collapse_runs(player_time_df: pd.DataFrame, team_index: dict) -> list[dict]
     return runs
 
 
+def _torso_angle_series(g: pd.DataFrame) -> pd.Series:
+    """Shoulder-midpoint -> hip-midpoint angle from vertical, per frame.
+    Requires both shoulder keypoints AND both hip keypoints above
+    TORSO_KEYPOINT_CONF_MIN -- NaN otherwise (matches the earlier per-frame
+    exploration's stricter "both landmarks confident" requirement rather
+    than falling back to a single side)."""
+    needed = ("kp_l_shoulder_x", "kp_r_shoulder_x", "kp_l_hip_x", "kp_r_hip_x")
+    if not all(c in g.columns for c in needed):
+        return pd.Series(np.nan, index=g.index)
+    sh_ok = (g["kp_l_shoulder_c"] >= TORSO_KEYPOINT_CONF_MIN) & (g["kp_r_shoulder_c"] >= TORSO_KEYPOINT_CONF_MIN)
+    hip_ok = (g["kp_l_hip_c"] >= TORSO_KEYPOINT_CONF_MIN) & (g["kp_r_hip_c"] >= TORSO_KEYPOINT_CONF_MIN)
+    sh_x = (g["kp_l_shoulder_x"] + g["kp_r_shoulder_x"]) / 2
+    sh_y = (g["kp_l_shoulder_y"] + g["kp_r_shoulder_y"]) / 2
+    hip_x = (g["kp_l_hip_x"] + g["kp_r_hip_x"]) / 2
+    hip_y = (g["kp_l_hip_y"] + g["kp_r_hip_y"]) / 2
+    angle = np.degrees(np.arctan2((sh_x - hip_x).abs(), (sh_y - hip_y).abs()))
+    return angle.where(sh_ok & hip_ok)
+
+
+def _torso_fall_runs(player_time_df: pd.DataFrame, team_index: dict) -> list[dict]:
+    """Per track, finds sustained (or single-frame-extreme) torso-angle
+    "lying down" runs -- the keypoint-based analog of `_collapse_runs`,
+    same tiered acceptance logic, different underlying signal."""
+    df = player_time_df[player_time_df["cls"] == "player"]
+    if df.empty or "kp_l_shoulder_x" not in df.columns:
+        return []  # needs the dual-pass pose columns (see pipeline.py/pose_estimator.py)
+
+    runs = []
+    for track_id, g in df.sort_values("frame").groupby("track_id"):
+        g = g.reset_index(drop=True)
+        angle = _torso_angle_series(g)
+        falling = (angle > TORSO_ANGLE_FALL_DEG).fillna(False)
+        extreme = (angle > TORSO_ANGLE_EXTREME_DEG).fillna(False)
+
+        start, has_extreme = None, False
+        for i, is_falling in enumerate(falling):
+            if is_falling:
+                if start is None:
+                    start = i
+                    has_extreme = bool(extreme.iloc[i])
+                else:
+                    has_extreme = has_extreme or bool(extreme.iloc[i])
+            elif start is not None:
+                if has_extreme or i - start >= TORSO_FALL_MIN_FRAMES:
+                    runs.append(_run_dict(track_id, g, start, i - 1, team_index))
+                start, has_extreme = None, False
+        if start is not None and (has_extreme or len(g) - start >= TORSO_FALL_MIN_FRAMES):
+            runs.append(_run_dict(track_id, g, start, len(g) - 1, team_index))
+    return runs
+
+
 def _run_dict(track_id, g: pd.DataFrame, i0: int, i1: int, team_index: dict) -> dict:
     seg = g.iloc[i0:i1 + 1]
     diag = ((seg["box_x2"] - seg["box_x1"]) ** 2 + (seg["box_y2"] - seg["box_y1"]) ** 2) ** 0.5
@@ -334,6 +405,28 @@ Applies the same MAX_CLOSING_SPEED_MPS plausibility cap the
     df = player_time_df[player_time_df["cls"] == "player"]
     team_index = _build_known_team_index(df)
     runs = _collapse_runs(player_time_df, team_index)
+    return _pair_runs_with_opponents(df, team_index, runs, "pose_collapse")
+
+
+def find_torso_fall_candidates(player_time_df: pd.DataFrame) -> list[dict]:
+    """Same idea as `find_pose_collapse_candidates`, but the "is this
+    player down" signal is torso angle from the dual-pass pose skeleton
+    (`_torso_fall_runs`) instead of box aspect ratio -- see
+    TORSO_ANGLE_FALL_DEG's comment for why this is a more direct signal.
+    Shares the exact same pairing/proximity/other-player-speed-only check
+    as the pose-collapse trigger (`_pair_runs_with_opponents`)."""
+    df = player_time_df[player_time_df["cls"] == "player"]
+    team_index = _build_known_team_index(df)
+    runs = _torso_fall_runs(player_time_df, team_index)
+    return _pair_runs_with_opponents(df, team_index, runs, "torso_fall")
+
+
+def _pair_runs_with_opponents(df: pd.DataFrame, team_index: dict, runs: list[dict], trigger: str) -> list[dict]:
+    """Shared by both pose-based triggers: for each "player is down" run,
+    finds any nearby opposing-team player and turns the pair into a
+    candidate. See `find_pose_collapse_candidates`'s docstring for why
+    proximity uses a narrow-then-broad window and why only the OTHER
+    player's speed is checked against MAX_CLOSING_SPEED_MPS."""
     candidates = []
     seen_pairs = set()
     for run in runs:
@@ -347,11 +440,6 @@ Applies the same MAX_CLOSING_SPEED_MPS plausibility cap the
         ]["track_id"].unique()
 
         for other_id in other_ids:
-            # Narrow window first (centered on the run's own timing, not the
-            # full +/-1s search window) so the other player's position isn't
-            # diluted by where they were well before/after the actual
-            # moment; only fall back to the broader window if they have no
-            # data at all that close (e.g. briefly occluded too).
             other = _track_window_stats(
                 df, other_id, run_center - POSE_PROXIMITY_WINDOW_S, run_center + POSE_PROXIMITY_WINDOW_S,
                 team_index, run_center,
@@ -364,21 +452,8 @@ Applies the same MAX_CLOSING_SPEED_MPS plausibility cap the
             avg_diag = (run["diag"] + other["diag"]) / 2
             if avg_diag <= 0 or dist_px > POSE_PROXIMITY_BOX_DIAGONALS * avg_diag:
                 continue
-            # Only the OTHER player's speed needs to stay plausible here --
-            # not the collapsing player's own. A box rapidly changing shape
-            # and position as a player falls inflates their own finite-
-            # difference speed_mps into an artifact of the collapse itself,
-            # not real movement (confirmed directly, the dev log 2026-07-16:
-            # 50.7 m/s for Chelsea-Burnley's falling player, 10.24 m/s for
-            # Palace-Arsenal's) -- summing it into a MAX_CLOSING_SPEED_MPS
-            # check built for the *distance/speed* trigger (where an
-            # implausible sum means a tracking-ID-switch, not a real
-            # collapse) was rejecting the clearest, most violent real falls
-            # hardest. The other player is expected to still be tracked
-            # normally, so their own speed alone is the meaningful check.
             if other["speed_mps"] > MAX_CLOSING_SPEED_MPS:
                 continue
-            closing_speed = other["speed_mps"]
             pair_key = tuple(sorted((run["track_id"], other_id)))
             if pair_key in seen_pairs:
                 continue
@@ -388,35 +463,40 @@ Applies the same MAX_CLOSING_SPEED_MPS plausibility cap the
                 "track_id_a": run["track_id"], "team_a": run["team"],
                 "track_id_b": other_id, "team_b": other["team"],
                 "location": ((run["x"] + other["x"]) / 2, (run["y"] + other["y"]) / 2),
-                "closing_speed_mps": closing_speed,
-                "trigger": "pose_collapse",
+                "closing_speed_mps": other["speed_mps"],
+                "trigger": trigger,
             })
     return sorted(candidates, key=lambda c: c["time_s"])
 
 
 def find_contact_candidates(player_time_df: pd.DataFrame) -> list[dict]:
-    """Union of two independent triggers: the original distance+speed gate
-    (unchanged) and the new pose-collapse gate (see
-    `find_pose_collapse_candidates`). A pose-collapse hit for a pair
-    already flagged by the distance/speed gate around the same time is
-    merged into that same candidate (adds "pose_collapse" to its
-    "triggers" list) rather than appended as a separate duplicate event
-    for what is very likely the same real contact."""
+    """Union of three independent triggers: the original distance+speed
+    gate (unchanged), the box-aspect-ratio pose-collapse gate (see
+    `find_pose_collapse_candidates`), and the torso-angle fall gate (see
+    `find_torso_fall_candidates`). A later trigger's hit for a pair already
+    flagged by an earlier one around the same time is merged into that
+    same candidate (its name appended to the "triggers" list) rather than
+    appended as a separate duplicate event for what is very likely the
+    same real contact."""
     candidates = _distance_speed_candidates(player_time_df)
     for c in candidates:
         c["triggers"] = [c.pop("trigger")]
 
-    for pc in find_pose_collapse_candidates(player_time_df):
-        pair_key = tuple(sorted((pc["track_id_a"], pc["track_id_b"])))
-        merged = False
-        for c in candidates:
-            if tuple(sorted((c["track_id_a"], c["track_id_b"]))) == pair_key \
-                    and abs(c["time_s"] - pc["time_s"]) < POSE_MERGE_WINDOW_S:
-                c["triggers"].append(pc.pop("trigger"))
-                merged = True
-                break
-        if not merged:
-            pc["triggers"] = [pc.pop("trigger")]
-            candidates.append(pc)
+    def _merge_in(new_candidates: list[dict]) -> None:
+        for pc in new_candidates:
+            pair_key = tuple(sorted((pc["track_id_a"], pc["track_id_b"])))
+            merged = False
+            for c in candidates:
+                if tuple(sorted((c["track_id_a"], c["track_id_b"]))) == pair_key \
+                        and abs(c["time_s"] - pc["time_s"]) < POSE_MERGE_WINDOW_S:
+                    c["triggers"].append(pc.pop("trigger"))
+                    merged = True
+                    break
+            if not merged:
+                pc["triggers"] = [pc.pop("trigger")]
+                candidates.append(pc)
+
+    _merge_in(find_pose_collapse_candidates(player_time_df))
+    _merge_in(find_torso_fall_candidates(player_time_df))
 
     return sorted(candidates, key=lambda c: c["time_s"])
