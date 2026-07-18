@@ -255,14 +255,54 @@ def _looks_like_wide_shot(frame_bgr: np.ndarray) -> bool:
     return width_frac > 0.85 and height_frac > 0.5
 
 
+# Plausibility gate (2026-07-18): validates ANY newly-computed calibration
+# (from either strategy) against physically reasonable pitch dimensions,
+# rather than trusting a homography just because it technically computed --
+# real-footage validation (card_swansea_manutd.mp4, a false goal traced to
+# this exact shot's calibration) found a homography that fit without error
+# but mapped the frame's own 4 corners to a ~643m span on a real 68m-wide
+# pitch -- confidently wrong, not just imprecise, and unrelated to whether
+# the fit itself "succeeded." Neither strategy's own internal checks catch
+# this, since both can return a well-formed homography for a genuinely bad
+# fit (e.g. the goal-area strategy locking onto the wrong line, or the
+# full-pitch strategy's contour not actually being the pitch boundary).
+CALIB_MAX_PLAUSIBLE_SPAN_M = 150.0  # frame corners' mapped extent, either axis
+CALIB_PLAUSIBLE_MARGIN_M = 20.0  # generous margin beyond the real pitch rectangle (technical area, crowd foreground visible in-frame)
+
+
+def _is_plausible_calibration(calibrator: PitchCalibrator, frame_w: int, frame_h: int) -> bool:
+    """True if the frame's own 4 corners map to a physically sane region --
+    within a generous multiple of the real pitch's own dimensions, and
+    overlapping a padded pitch rectangle at all. Does not require the
+    mapped region to equal the real pitch (a tight shot legitimately only
+    covers part of it) -- only that it isn't absurd."""
+    xs, ys = [], []
+    for px, py in ((0, 0), (frame_w, 0), (0, frame_h), (frame_w, frame_h)):
+        x, y = calibrator.pixel_to_pitch(px, py)
+        xs.append(x)
+        ys.append(y)
+    if (max(xs) - min(xs)) > CALIB_MAX_PLAUSIBLE_SPAN_M or (max(ys) - min(ys)) > CALIB_MAX_PLAUSIBLE_SPAN_M:
+        return False
+    x_lo, x_hi = -CALIB_PLAUSIBLE_MARGIN_M, PITCH_LENGTH_M + CALIB_PLAUSIBLE_MARGIN_M
+    y_lo, y_hi = -CALIB_PLAUSIBLE_MARGIN_M, PITCH_WIDTH_M + CALIB_PLAUSIBLE_MARGIN_M
+    return min(xs) <= x_hi and max(xs) >= x_lo and min(ys) <= y_hi and max(ys) >= y_lo
+
+
 def calibrate_frame(frame_bgr: np.ndarray, person_boxes: list) -> PitchCalibrator | None:
+    h, w = frame_bgr.shape[:2]
+
+    def _plausible(calib: PitchCalibrator | None) -> PitchCalibrator | None:
+        if calib is not None and _is_plausible_calibration(calib, w, h):
+            return calib
+        return None
+
     if _looks_like_wide_shot(frame_bgr):
-        calib = calibrate_full_pitch_boundary(frame_bgr)
+        calib = _plausible(calibrate_full_pitch_boundary(frame_bgr))
         if calib is not None:
             return calib
-        return calibrate_goal_area(frame_bgr, person_boxes)
+        return _plausible(calibrate_goal_area(frame_bgr, person_boxes))
 
-    calib = calibrate_goal_area(frame_bgr, person_boxes)
+    calib = _plausible(calibrate_goal_area(frame_bgr, person_boxes))
     if calib is not None:
         return calib
-    return calibrate_full_pitch_boundary(frame_bgr)
+    return _plausible(calibrate_full_pitch_boundary(frame_bgr))

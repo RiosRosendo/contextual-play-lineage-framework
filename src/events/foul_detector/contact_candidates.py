@@ -118,6 +118,19 @@ TEAM_LOOKUP_WINDOW_S = 1.0
 # player.
 POSE_PROXIMITY_WINDOW_S = 0.3
 
+# Contact-confirmation requirement (2026-07-18): the proximity check above
+# (POSE_PROXIMITY_BOX_DIAGONALS, up to 2 box-diagonals apart) was designed
+# to find a nearby opponent for a player who is already confirmed falling --
+# it was never meant to substitute for confirming the two players actually
+# touched. Real-footage validation (Rosendo's own review of the rendered
+# demo) found this matters in practice: a player beginning to slide toward
+# an opponent can satisfy the proximity check before any contact has
+# actually happened. Requires real box overlap (IoU > 0) between the
+# falling player and the candidate opponent at some common frame within
+# the run's own tolerance window, in addition to the existing checks --
+# not a replacement for them, an additional gate.
+CONTACT_CONFIRM_FRAME_TOLERANCE_S = 0.02  # ~1 frame at typical broadcast fps, for matching the two tracks' timestamps
+
 # Torso-angle fall detector: a purpose-built "is this player down" signal
 # using the dual-pass pose skeleton (src/perception/pose_estimator.py)
 # instead of box aspect ratio -- more direct, since it measures body
@@ -470,12 +483,46 @@ def find_torso_fall_candidates(player_time_df: pd.DataFrame) -> list[dict]:
     return _pair_runs_with_opponents(df, team_index, runs, "torso_fall")
 
 
+def _box_iou(a: tuple, b: tuple) -> float:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    union = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _has_confirmed_contact(df: pd.DataFrame, track_a, track_b, t0: float, t1: float) -> bool:
+    """True if track_a's and track_b's tracked boxes genuinely overlap
+    (IoU > 0) at any common frame within [t0, t1] -- real contact
+    confirmation, not an averaged-position proximity estimate. The two
+    tracks aren't guaranteed to share identical timestamps, so frames are
+    matched within CONTACT_CONFIRM_FRAME_TOLERANCE_S of each other."""
+    seg_a = df[(df["track_id"] == track_a) & (df["time_s"] >= t0) & (df["time_s"] <= t1)]
+    seg_b = df[(df["track_id"] == track_b) & (df["time_s"] >= t0) & (df["time_s"] <= t1)]
+    if seg_a.empty or seg_b.empty:
+        return False
+    for _, ra in seg_a.iterrows():
+        nearby_b = seg_b[(seg_b["time_s"] - ra["time_s"]).abs() <= CONTACT_CONFIRM_FRAME_TOLERANCE_S]
+        if nearby_b.empty:
+            continue
+        box_a = (ra["box_x1"], ra["box_y1"], ra["box_x2"], ra["box_y2"])
+        for _, rb in nearby_b.iterrows():
+            box_b = (rb["box_x1"], rb["box_y1"], rb["box_x2"], rb["box_y2"])
+            if _box_iou(box_a, box_b) > 0:
+                return True
+    return False
+
+
 def _pair_runs_with_opponents(df: pd.DataFrame, team_index: dict, runs: list[dict], trigger: str) -> list[dict]:
     """Shared by both pose-based triggers: for each "player is down" run,
     finds any nearby opposing-team player and turns the pair into a
     candidate. See `find_pose_collapse_candidates`'s docstring for why
     proximity uses a narrow-then-broad window and why only the OTHER
-    player's speed is checked against MAX_CLOSING_SPEED_MPS."""
+    player's speed is checked against MAX_CLOSING_SPEED_MPS. Also requires
+    `_has_confirmed_contact` -- see that function's comment -- before
+    accepting the pairing at all."""
     candidates = []
     seen_pairs = set()
     for run in runs:
@@ -502,6 +549,8 @@ def _pair_runs_with_opponents(df: pd.DataFrame, team_index: dict, runs: list[dic
             if avg_diag <= 0 or dist_px > POSE_PROXIMITY_BOX_DIAGONALS * avg_diag:
                 continue
             if other["speed_mps"] > MAX_CLOSING_SPEED_MPS:
+                continue
+            if not _has_confirmed_contact(df, run["track_id"], other_id, t0, t1):
                 continue
             pair_key = tuple(sorted((run["track_id"], other_id)))
             if pair_key in seen_pairs:
@@ -641,11 +690,27 @@ def _filter_by_calibration_confidence(candidates: list[dict], df: pd.DataFrame) 
     """Drops any candidate where either participant's shot didn't use its
     own real calibration -- see REQUIRE_OWN_CALIBRATION's comment. A no-op
     if the calib_source column doesn't exist at all (synthetic clip),
-    rather than excluding everything for lack of a column it never had."""
+    rather than excluding everything for lack of a column it never had.
+
+    EXEMPTS candidates whose ONLY trigger is `keypoint_contact`
+    (2026-07-18): that trigger operates purely in pixel/keypoint space and
+    never touches calibrated position, so calibration unreliability
+    doesn't actually undermine it. Confirmed directly: this gate was
+    silently excluding the flagship Swansea-Man Utd standing-tackle catch,
+    whose shot's calibration is genuinely bad (correctly rejected by the
+    new plausibility check, same session) but whose two participants are
+    unambiguously real players caught via direct joint proximity,
+    independent of that calibration. A candidate merged from MULTIPLE
+    triggers (e.g. keypoint_contact + pose_collapse) still goes through
+    the full check, since a calibration-dependent trigger contributed to
+    it too."""
     if not REQUIRE_OWN_CALIBRATION or "calib_source" not in df.columns:
         return candidates
     kept = []
     for c in candidates:
+        if c.get("triggers") == ["keypoint_contact"]:
+            kept.append(c)
+            continue
         src_a = _calib_source_at(df, c["track_id_a"], c["time_s"])
         src_b = _calib_source_at(df, c["track_id_b"], c["time_s"])
         if src_a == "own" and src_b == "own":

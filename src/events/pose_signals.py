@@ -69,6 +69,38 @@ CONTACT_RULES = (
 CONTACT_FRAC_OF_HEIGHT = 0.2
 CONTACT_EVENT_GAP_S = 1.0  # debounce repeated hits for the same pair+type
 
+# Contact-confirmation requirement (2026-07-18): real-footage validation
+# found CONTACT_FRAC_OF_HEIGHT=0.2 -- normalized by the MEAN of the two
+# players' box heights -- can be satisfied by two players simply running
+# close together mid-stride, not real contact (confirmed directly:
+# Leicester-Man City, t=10.40s, both players plainly upright and running,
+# no tackle for another ~0.3s). Normalizing by the MEAN also makes this
+# worse exactly when it matters most: if one player's box is a corrupted,
+# oversized tracking artifact (common during a real tangle), it inflates
+# the mean and with it the effective absolute-pixel threshold. leg_contact
+# and elbow_to_body -- the two types most exposed to this failure mode --
+# now require a second, much tighter bound normalized by the SMALLER of
+# the two box heights instead, representing genuine near-touching rather
+# than "within plausible reach."
+#
+# hand_to_face joined this list the same day, after a second real-footage
+# instance of the identical failure mode: once keypoint_contact candidates
+# were exempted from the calibration-confidence gate (needed to stop
+# excluding the Swansea-Man Utd flagship tackle, whose own shot's
+# calibration is genuinely bad but whose participants are real), two
+# spurious hand_to_face candidates reappeared on that same fallback-
+# calibrated shot (t=3.00s, t=3.16s) -- traced to a crowd-panning frame
+# with no match action in it at all (confirmed by pulling the raw frame:
+# a blurred foreground player passing camera and in-focus spectators in
+# the stands behind, not a tackle). hand_to_face's min_frames=1 (no
+# sustain requirement at all, unlike shirt_pull's 5) makes it the most
+# exposed of the four rules to exactly this kind of single-frame pose
+# noise, so it needed the same tightening, not an exemption. shirt_pull
+# remains unchanged -- its own 5-frame sustain requirement already
+# provides an equivalent, independent guard against single-frame noise.
+CONTACT_CONFIRM_TYPES = ("leg_contact", "elbow_to_body", "hand_to_face")
+CONTACT_CONFIRM_FRAC_OF_HEIGHT = 0.08
+
 # elbow_to_body's second tightening (2026-07-17): sustained proximity alone
 # (ELBOW_MIN_FRAMES) still doesn't distinguish a real strike from two
 # players simply running near each other for a few frames -- a genuine
@@ -166,8 +198,25 @@ def _has_co_occurring_deceleration(a: pd.Series, b: pd.Series, frame,
 def contact_type_events(player_time_df: pd.DataFrame) -> list[dict]:
     """Scans every frame for opposing-player pairs whose keypoints satisfy a
     CONTACT_RULES entry. Directional: (a, b) means a's attacker-region
-    joint touched b's victim-region -- both directions are checked."""
-    players = player_time_df[player_time_df["cls"] == "player"]
+    joint touched b's victim-region -- both directions are checked.
+
+    Includes `"low_confidence"` rows (see pipeline.py) alongside `"player"`
+    -- deliberately, not an oversight: this signal is pixel/keypoint-space
+    only and never touches calibrated position, so a shot's calibration
+    being unreliable doesn't actually undermine it, unlike the
+    calibration-dependent triggers (distance/speed, closing-speed caps)
+    that correctly keep excluding these rows. Real-footage validation
+    (2026-07-18) found the opposite (blanket exclusion) was too broad: it
+    silently killed the flagship Swansea-Man Utd standing-tackle catch,
+    whose own shot's calibration is genuinely bad (correctly rejected that
+    same session) but whose two participants are unambiguously real
+    players. Disclosed trade-off: a crowd member's keypoints, if the pose
+    model finds any at all (less likely for small/distant/blurred crowd
+    crops than a foreground player), could in principle still produce a
+    spurious reading here -- no confirmed instance of this so far, unlike
+    the box/distance-based triggers this project has already found real
+    crowd false positives on."""
+    players = player_time_df[player_time_df["cls"].isin(("player", "low_confidence"))]
     if players.empty or "kp_nose_x" not in players.columns:
         return []
     team_index = _build_known_team_index(players)
@@ -201,6 +250,11 @@ def contact_type_events(player_time_df: pd.DataFrame) -> list[dict]:
                     if dist is None or dist > thresh:
                         streaks.pop(key, None)
                         continue
+                    if ctype in CONTACT_CONFIRM_TYPES:
+                        min_h = min(_box_height(a), _box_height(b))
+                        if min_h <= 0 or dist > CONTACT_CONFIRM_FRAC_OF_HEIGHT * min_h:
+                            streaks.pop(key, None)
+                            continue
                     streak = streaks.setdefault(key, {"n": 0, "start_t": t, "min_dist": dist, "has_decel": False})
                     streak["n"] += 1
                     streak["min_dist"] = min(streak["min_dist"], dist)
