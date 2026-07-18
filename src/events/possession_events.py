@@ -15,6 +15,27 @@ GOAL_LINE_MARGIN_M = 2.0
 GOAL_MOUTH_Y = (30.34, 37.66)  # standard 7.32m goal width, centered on a 68m-wide pitch
 POSSESSION_DEBOUNCE_FRAMES = 3  # min consecutive frames before a nearest-player change counts
 
+# Goal-detection plausibility gate (2026-07-17): real-footage validation
+# (Leicester-Man City) found `detect_goal_events` firing on a single spurious
+# ball-position reading (x=-30.7, far outside any real pitch even with
+# generous margin -- almost certainly a stray misdetection or a calibration
+# artifact, not a real ball position) crossing the naive single-frame check
+# near a stoppage (ball out of play), not an actual goal. Two independent
+# guards, matching this project's established layered-defense pattern (e.g.
+# MAX_CLOSING_SPEED_MPS + team + proximity for contact candidates): (1) a
+# plausibility bound on the ball's own position, generous enough that a real
+# goal-mouth ball position never trips it; (2) requiring the in-mouth,
+# near-goal-line condition to hold for several CONSECUTIVE frames, not one,
+# since a real goal has the ball lingering in/near the net, while a
+# misdetection or a ball briefly crossing the byline for a corner/goal-kick
+# does not. This heuristic should always be treated as inferior to an
+# official goal label when one is available (see `official_goal_event` and
+# `run_events`'s `external_goal_events` parameter) -- these guards only
+# reduce this heuristic's own false-positive rate for clips/windows where no
+# official label exists to use instead.
+GOAL_PLAUSIBLE_MARGIN_M = 10.0  # ball x/y must fall within the pitch + this much padding
+GOAL_MIN_SUSTAINED_FRAMES = 3
+
 
 def _goal_mouth_x(team: str) -> float:
     return GOAL_X_TEAM_A_ATTACKS if team == "team_a" else 0.0
@@ -116,21 +137,42 @@ def official_goal_event(time_s: float, team: str | None = None) -> dict:
 
 def detect_goal_events(player_time_df: pd.DataFrame) -> list[dict]:
     """A "goal" is the ball crossing within GOAL_LINE_MARGIN_M of either goal
-    line, inside the goal mouth's y-range. Deliberately simple -- the project spec
-    section 3 -- and only fires once per approach (the first frame it enters
-    the goal-line margin) rather than debouncing multi-frame lingering."""
+    line, inside the goal mouth's y-range, SUSTAINED for GOAL_MIN_SUSTAINED_FRAMES
+    consecutive frames (2026-07-17, was a single-frame crossing -- see
+    GOAL_PLAUSIBLE_MARGIN_M's comment for why that misfired on real footage).
+    Also rejects any ball reading outside a generously padded pitch
+    boundary before it's even considered, since a real ball position never
+    needs to be that implausible to register as "in the goal mouth."
+    Prefer an official goal label over this heuristic whenever one is
+    available (`official_goal_event` / `run_events`'s `external_goal_events`)
+    -- this remains a fallback for clips/windows with no such label, not the
+    trusted source of truth."""
     ball_df = player_time_df[player_time_df["cls"] == "ball"].sort_values("time_s")
     events = []
     already_scored = False
+    streak_team, streak_n, streak_start = None, 0, None
     for _, row in ball_df.iterrows():
-        near_x_max = row["x"] >= GOAL_X_TEAM_A_ATTACKS - GOAL_LINE_MARGIN_M
-        near_x_min = row["x"] <= GOAL_LINE_MARGIN_M
-        in_mouth = GOAL_MOUTH_Y[0] <= row["y"] <= GOAL_MOUTH_Y[1]
-        if in_mouth and (near_x_max or near_x_min) and not already_scored:
-            scoring_team = "team_a" if near_x_max else "team_b"
+        x, y = row["x"], row["y"]
+        plausible = (
+            -GOAL_PLAUSIBLE_MARGIN_M <= x <= GOAL_X_TEAM_A_ATTACKS + GOAL_PLAUSIBLE_MARGIN_M
+            and -GOAL_PLAUSIBLE_MARGIN_M <= y <= 68.0 + GOAL_PLAUSIBLE_MARGIN_M
+        )
+        near_x_max = plausible and x >= GOAL_X_TEAM_A_ATTACKS - GOAL_LINE_MARGIN_M
+        near_x_min = plausible and x <= GOAL_LINE_MARGIN_M
+        in_mouth = plausible and GOAL_MOUTH_Y[0] <= y <= GOAL_MOUTH_Y[1]
+        team = ("team_a" if near_x_max else "team_b") if (in_mouth and (near_x_max or near_x_min)) else None
+
+        if team is not None and team == streak_team:
+            streak_n += 1
+        elif team is not None:
+            streak_team, streak_n, streak_start = team, 1, row
+        else:
+            streak_team, streak_n, streak_start = None, 0, None
+
+        if team is not None and streak_n >= GOAL_MIN_SUSTAINED_FRAMES and not already_scored:
             events.append({
-                "type": "goal", "time_s": row["time_s"], "team": scoring_team,
-                "location": (row["x"], row["y"]),
+                "type": "goal", "time_s": streak_start["time_s"], "team": team,
+                "location": (streak_start["x"], streak_start["y"]),
             })
             already_scored = True
     return events
