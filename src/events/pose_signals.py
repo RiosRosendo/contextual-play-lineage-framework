@@ -49,10 +49,15 @@ LEGS = ("l_knee", "r_knee", "l_ankle", "r_ankle")
 # (attacker region, victim region, contact type, min consecutive frames).
 # Single-frame for strikes (contact is instantaneous); shirt-pull needs to
 # be SUSTAINED -- a grip held over time is exactly what distinguishes it
-# from a hand incidentally brushing past a torso.
+# from a hand incidentally brushing past a torso. elbow_to_body's 3-frame
+# minimum (2026-07-17, was 1) exists for the same reason: real-footage
+# validation found single-frame proximity alone firing on two players
+# simply running alongside each other, not a strike -- see
+# ELBOW_DECEL_MIN_FRAC below for the second, independent tightening.
+ELBOW_MIN_FRAMES = 3
 CONTACT_RULES = (
     (HANDS, HEAD, "hand_to_face", 1),
-    (ELBOWS, TORSO, "elbow_to_body", 1),
+    (ELBOWS, TORSO, "elbow_to_body", ELBOW_MIN_FRAMES),
     (HANDS, TORSO, "shirt_pull", 5),
     (LEGS, LEGS, "leg_contact", 1),
 )
@@ -63,6 +68,20 @@ CONTACT_RULES = (
 # tight enough that a neighbor a meter away doesn't trigger).
 CONTACT_FRAC_OF_HEIGHT = 0.2
 CONTACT_EVENT_GAP_S = 1.0  # debounce repeated hits for the same pair+type
+
+# elbow_to_body's second tightening (2026-07-17): sustained proximity alone
+# (ELBOW_MIN_FRAMES) still doesn't distinguish a real strike from two
+# players simply running near each other for a few frames -- a genuine
+# elbow contact should coincide with at least one participant's motion
+# being disrupted (checked, decelerated), not both players continuing on
+# their own steady pace. ELBOW_DECEL_BASELINE_WINDOW_S sets how far back
+# "this player's own recent normal speed" is measured from (the same
+# rolling-baseline idea used elsewhere in this project, e.g.
+# contact_candidates.py's pose-collapse baseline); ELBOW_DECEL_MIN_FRAC is
+# how much at least one participant's speed must drop below that baseline,
+# at any point during the sustained-contact streak, for it to count.
+ELBOW_DECEL_BASELINE_WINDOW_S = 1.0
+ELBOW_DECEL_MIN_FRAC = 0.3
 
 # Handball: wrist within this fraction of the player's box height of the
 # ball's box center.
@@ -104,6 +123,46 @@ def _box_height(row: pd.Series) -> float:
     return float(row["box_y2"] - row["box_y1"])
 
 
+def _speed_baseline_lookup(players: pd.DataFrame) -> dict[tuple, float]:
+    """Per (track_id, frame), that track's own recent rolling-mean speed
+    (shifted by 1 so "recent" never includes the current frame) --
+    ELBOW_DECEL_BASELINE_WINDOW_S's "what normal looked like a moment ago"
+    for the elbow_to_body deceleration check. Missing/too-early frames
+    (not enough history yet) simply have no entry, same "abstain rather
+    than guess" spirit as this project's other baseline computations."""
+    if "speed_mps" not in players.columns:
+        return {}
+    dt = players["time_s"].diff().median()
+    if not dt or dt <= 0:
+        return {}
+    window = max(3, round(ELBOW_DECEL_BASELINE_WINDOW_S / dt))
+    lookup: dict[tuple, float] = {}
+    for track_id, g in players.sort_values("frame").groupby("track_id"):
+        g = g.reset_index(drop=True)
+        baseline = g["speed_mps"].rolling(window=window, min_periods=3).mean().shift(1)
+        for i, frame_val in enumerate(g["frame"]):
+            b = baseline.iloc[i]
+            if pd.notna(b):
+                lookup[(track_id, frame_val)] = float(b)
+    return lookup
+
+
+def _has_co_occurring_deceleration(a: pd.Series, b: pd.Series, frame,
+                                    speed_baseline: dict[tuple, float]) -> bool:
+    """True if at least one of the two participants' speed at this frame
+    has dropped to ELBOW_DECEL_MIN_FRAC below their own recent baseline --
+    a real strike/collision checks at least one player's motion; two
+    players merely running alongside each other don't."""
+    for row in (a, b):
+        speed = row.get("speed_mps")
+        baseline = speed_baseline.get((row["track_id"], frame))
+        if speed is None or baseline is None or baseline <= 0:
+            continue
+        if speed <= (1 - ELBOW_DECEL_MIN_FRAC) * baseline:
+            return True
+    return False
+
+
 def contact_type_events(player_time_df: pd.DataFrame) -> list[dict]:
     """Scans every frame for opposing-player pairs whose keypoints satisfy a
     CONTACT_RULES entry. Directional: (a, b) means a's attacker-region
@@ -112,6 +171,7 @@ def contact_type_events(player_time_df: pd.DataFrame) -> list[dict]:
     if players.empty or "kp_nose_x" not in players.columns:
         return []
     team_index = _build_known_team_index(players)
+    speed_baseline = _speed_baseline_lookup(players)
 
     # (pair_key, type) -> list of consecutive frame hits, for the sustained rules
     streaks: dict[tuple, dict] = {}
@@ -141,10 +201,14 @@ def contact_type_events(player_time_df: pd.DataFrame) -> list[dict]:
                     if dist is None or dist > thresh:
                         streaks.pop(key, None)
                         continue
-                    streak = streaks.setdefault(key, {"n": 0, "start_t": t, "min_dist": dist})
+                    streak = streaks.setdefault(key, {"n": 0, "start_t": t, "min_dist": dist, "has_decel": False})
                     streak["n"] += 1
                     streak["min_dist"] = min(streak["min_dist"], dist)
+                    if ctype == "elbow_to_body" and _has_co_occurring_deceleration(a, b, frame, speed_baseline):
+                        streak["has_decel"] = True
                     if streak["n"] < min_frames:
+                        continue
+                    if ctype == "elbow_to_body" and not streak["has_decel"]:
                         continue
                     if t - last_event_t.get(key, -999) < CONTACT_EVENT_GAP_S:
                         continue

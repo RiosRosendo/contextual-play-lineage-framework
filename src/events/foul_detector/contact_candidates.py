@@ -138,6 +138,21 @@ TORSO_ANGLE_FALL_DEG = 60.0  # sustained-run threshold
 TORSO_ANGLE_EXTREME_DEG = 70.0  # single-frame threshold (same tiered logic as POSE_EXTREME_ABS_RATIO)
 TORSO_FALL_MIN_FRAMES = 3
 
+# Calibration-confidence gate (2026-07-17): a foul candidate is only as
+# trustworthy as the positional data behind it. Real-footage validation
+# found several Swansea-Man Utd candidates pairing a real player against a
+# crowd/sideline false detection that the Layer 1 pitch-boundary filter
+# (src/perception/pipeline.py) failed to exclude -- specifically on shots
+# using `calib_source == "fallback_prev_shot"`, where a close-up shot with
+# no pitch lines of its own reuses a differently-framed preceding shot's
+# homography, so the filter's padded-pitch-rectangle check doesn't mean
+# anything for this shot's actual framing. Rather than trust that filter's
+# silence as confirmation, a candidate is excluded here outright unless
+# BOTH participants' calibration for this shot is `"own"` (a real,
+# independently-fit homography, not a placeholder or a reused one from a
+# different shot).
+REQUIRE_OWN_CALIBRATION = True
+
 # Keypoint-contact trigger: promotes src/events/pose_signals.contact_type_events
 # (joint-to-joint proximity between opposing players -- hand_to_face,
 # elbow_to_body, shirt_pull, leg_contact) directly into first-class foul
@@ -608,6 +623,36 @@ def _dedup_same_pair_candidates(candidates: list[dict]) -> list[dict]:
     return sorted(deduped, key=lambda c: c["time_s"])
 
 
+def _calib_source_at(df: pd.DataFrame, track_id, t: float) -> str | None:
+    """The calib_source (see pipeline.py) of the row nearest time t for this
+    track -- None if the track has no rows, or the column doesn't exist
+    (e.g. the synthetic clip's color backend, which has no calibration
+    tiers at all)."""
+    if "calib_source" not in df.columns:
+        return None
+    seg = df[df["track_id"] == track_id]
+    if seg.empty:
+        return None
+    idx = (seg["time_s"] - t).abs().idxmin()
+    return seg.loc[idx, "calib_source"]
+
+
+def _filter_by_calibration_confidence(candidates: list[dict], df: pd.DataFrame) -> list[dict]:
+    """Drops any candidate where either participant's shot didn't use its
+    own real calibration -- see REQUIRE_OWN_CALIBRATION's comment. A no-op
+    if the calib_source column doesn't exist at all (synthetic clip),
+    rather than excluding everything for lack of a column it never had."""
+    if not REQUIRE_OWN_CALIBRATION or "calib_source" not in df.columns:
+        return candidates
+    kept = []
+    for c in candidates:
+        src_a = _calib_source_at(df, c["track_id_a"], c["time_s"])
+        src_b = _calib_source_at(df, c["track_id_b"], c["time_s"])
+        if src_a == "own" and src_b == "own":
+            kept.append(c)
+    return kept
+
+
 def find_contact_candidates(player_time_df: pd.DataFrame) -> list[dict]:
     """Union of four independent triggers: the original distance+speed
     gate (unchanged), the box-aspect-ratio pose-collapse gate (see
@@ -617,9 +662,11 @@ def find_contact_candidates(player_time_df: pd.DataFrame) -> list[dict]:
     already flagged by an earlier one around the same time is merged into
     that same candidate (its name appended to the "triggers" list) rather
     than appended as a separate duplicate event for what is very likely
-    the same real contact. A final pass (`_dedup_same_pair_candidates`)
-    then chain-merges any remaining same-pair candidates that are still
-    close in time -- see DEDUP_WINDOW_S."""
+    the same real contact. Candidates are then dropped if either
+    participant's positional data isn't confidently calibrated (see
+    REQUIRE_OWN_CALIBRATION), before a final pass
+    (`_dedup_same_pair_candidates`) chain-merges any remaining same-pair
+    candidates that are still close in time -- see DEDUP_WINDOW_S."""
     candidates = _distance_speed_candidates(player_time_df)
     for c in candidates:
         c["triggers"] = [c.pop("trigger")]
@@ -642,5 +689,6 @@ def find_contact_candidates(player_time_df: pd.DataFrame) -> list[dict]:
     _merge_in(find_torso_fall_candidates(player_time_df))
     _merge_in(find_keypoint_contact_candidates(player_time_df))
 
+    candidates = _filter_by_calibration_confidence(candidates, player_time_df)
     candidates = _dedup_same_pair_candidates(candidates)
     return sorted(candidates, key=lambda c: c["time_s"])
