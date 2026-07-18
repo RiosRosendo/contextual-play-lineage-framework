@@ -32,6 +32,23 @@ from src.perception.synthetic_clip import (
 )
 from src.run_pipeline import run_pipeline
 
+# Standard COCO 17-keypoint skeleton edges (joint name pairs, matching
+# src/perception/pose_estimator.py's KEYPOINT_NAMES) -- draws what the
+# dual-pass pose pipeline already computes internally (kp_<name>_x/_y/_c
+# columns) but was never visualized before. Only drawn for player/referee
+# rows (see the drawing call site), not non_player, so a crowd detection
+# correctly excluded from "player" doesn't also get a misleading skeleton.
+POSE_SKELETON = (
+    ("nose", "l_eye"), ("nose", "r_eye"), ("l_eye", "l_ear"), ("r_eye", "r_ear"),
+    ("l_shoulder", "r_shoulder"),
+    ("l_shoulder", "l_elbow"), ("l_elbow", "l_wrist"),
+    ("r_shoulder", "r_elbow"), ("r_elbow", "r_wrist"),
+    ("l_shoulder", "l_hip"), ("r_shoulder", "r_hip"), ("l_hip", "r_hip"),
+    ("l_hip", "l_knee"), ("l_knee", "l_ankle"),
+    ("r_hip", "r_knee"), ("r_knee", "r_ankle"),
+)
+POSE_KEYPOINT_CONF_MIN = 0.3  # matches src/events/pose_signals.py's KEYPOINT_CONF_MIN
+
 # Dim gray, distinct from both team colors, referee yellow, and ball orange --
 # a "non_player" (crowd/sideline/bench, see src/perception/pipeline.py's
 # pitch-boundary filter) drawn in its own color rather than silently
@@ -79,6 +96,22 @@ def _color_for(cls: str, team: str | None) -> tuple:
     if cls == "non_player":
         return NON_PLAYER_COLOR_BGR
     return _TEAM_COLOR.get(team, (200, 200, 200))
+
+
+def _draw_skeleton(frame: np.ndarray, row: pd.Series, color: tuple) -> None:
+    """Draws POSE_SKELETON's lines between this row's kp_<name>_x/_y
+    columns, skipping any joint below POSE_KEYPOINT_CONF_MIN or any row
+    with no pose columns at all (e.g. a clip run before the dual-pass pose
+    pipeline existed, or a ball row)."""
+    if "kp_nose_x" not in row.index:
+        return
+    for a, b in POSE_SKELETON:
+        ca, cb = row.get(f"kp_{a}_c"), row.get(f"kp_{b}_c")
+        if pd.isna(ca) or pd.isna(cb) or ca < POSE_KEYPOINT_CONF_MIN or cb < POSE_KEYPOINT_CONF_MIN:
+            continue
+        pa = (int(row[f"kp_{a}_x"]), int(row[f"kp_{a}_y"]))
+        pb = (int(row[f"kp_{b}_x"]), int(row[f"kp_{b}_y"]))
+        cv2.line(frame, pa, pb, color, 2, cv2.LINE_AA)
 
 
 def _draw_events_and_alert(frame: np.ndarray, t_s: float, events: list[dict],
@@ -200,6 +233,8 @@ def _render_real_overlay(video_path: str, out_path: Path, result: dict | None = 
                 color = _color_for(row["cls"], row["team"])
                 x1, y1, x2, y2 = int(row["box_x1"]), int(row["box_y1"]), int(row["box_x2"]), int(row["box_y2"])
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                if row["cls"] in ("player", "referee"):
+                    _draw_skeleton(frame, row, color)
                 cls_label = _CLS_LABEL.get(row["cls"])
                 if cls_label is not None:
                     if pd.notna(row["team"]):
