@@ -128,15 +128,30 @@ def _run_yolo_backend_shot(video_path: str, calibrator: PitchCalibrator, fps: fl
             cx, cy = (t["box"][0] + t["box"][2]) / 2, (t["box"][1] + t["box"][3]) / 2
             x_m, y_m = calibrator.pixel_to_pitch(cx, cy)
             cls = {"person": "player", "referee": "referee", "ball": "ball"}.get(t["cls"], t["cls"])
-            if cls == "player" and not (
-                -SIDELINE_MARGIN_M <= x_m <= pitch_calibration_cv.PITCH_LENGTH_M + SIDELINE_MARGIN_M
-                and -SIDELINE_MARGIN_M <= y_m <= pitch_calibration_cv.PITCH_WIDTH_M + SIDELINE_MARGIN_M
-            ):
-                # Calibrated position falls well outside the real pitch --
-                # not a player (see SIDELINE_MARGIN_M above). Reclassified
-                # rather than dropped, so this is auditable the same way
-                # calib_source already is.
-                cls = "non_player"
+            if cls == "player":
+                if calib_source != "own":
+                    # The pitch-boundary check below depends entirely on
+                    # the calibrated (x_m, y_m) being meaningful -- on a
+                    # shot using fallback_prev_shot (a differently-framed
+                    # preceding shot's reused homography) or the flat
+                    # placeholder, it isn't, so the check's answer would be
+                    # confidently wrong rather than just unreliable at the
+                    # margins (2026-07-17: confirmed directly -- crowd
+                    # detections on exactly these shots kept reading as
+                    # "player" since the whole frame maps inside the
+                    # padded pitch rectangle). Mark honestly as low
+                    # confidence instead of trusting a geometric check
+                    # built on positions we already know aren't real here.
+                    cls = "low_confidence"
+                elif not (
+                    -SIDELINE_MARGIN_M <= x_m <= pitch_calibration_cv.PITCH_LENGTH_M + SIDELINE_MARGIN_M
+                    and -SIDELINE_MARGIN_M <= y_m <= pitch_calibration_cv.PITCH_WIDTH_M + SIDELINE_MARGIN_M
+                ):
+                    # Calibrated position falls well outside the real pitch --
+                    # not a player (see SIDELINE_MARGIN_M above). Reclassified
+                    # rather than dropped, so this is auditable the same way
+                    # calib_source already is.
+                    cls = "non_player"
             row = {
                 "frame": frame_idx, "time_s": frame_idx / fps, "track_id": t["track_id"] + track_id_offset,
                 "cls": cls, "team": t["team"],

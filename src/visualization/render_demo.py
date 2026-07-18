@@ -54,7 +54,17 @@ POSE_KEYPOINT_CONF_MIN = 0.3  # matches src/events/pose_signals.py's KEYPOINT_CO
 # pitch-boundary filter) drawn in its own color rather than silently
 # inheriting a team color it no longer represents.
 NON_PLAYER_COLOR_BGR = (130, 130, 130)
-_CLS_LABEL = {"player": "PLAYER", "referee": "REFEREE", "non_player": "NON-PLAYER"}
+# Distinct magenta -- src/perception/pipeline.py marks a "player"-cls
+# detection as "low_confidence" instead of running the pitch-boundary
+# player/non_player check at all, on any shot whose calibration itself
+# isn't trustworthy (calib_source != "own"). Rendered in its own color
+# and label rather than silently defaulting to PLAYER, so a viewer sees
+# "uncertain" instead of a confidently wrong tag.
+LOW_CONFIDENCE_COLOR_BGR = (200, 0, 200)
+_CLS_LABEL = {
+    "player": "PLAYER", "referee": "REFEREE", "non_player": "NON-PLAYER",
+    "low_confidence": "LOW-CONF",
+}
 
 SYNTHETIC_CLIP_PATH = "data/raw/synthetic_match_clip.mp4"
 
@@ -95,6 +105,8 @@ def _color_for(cls: str, team: str | None) -> tuple:
         return REF_COLOR_BGR
     if cls == "non_player":
         return NON_PLAYER_COLOR_BGR
+    if cls == "low_confidence":
+        return LOW_CONFIDENCE_COLOR_BGR
     return _TEAM_COLOR.get(team, (200, 200, 200))
 
 
