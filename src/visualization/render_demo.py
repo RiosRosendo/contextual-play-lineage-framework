@@ -22,13 +22,22 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pandas as pd
 
+from src.assistant.explain import assess_foul_candidate
 from src.perception import scene_cut
 from src.perception.synthetic_clip import (
     BALL_COLOR_BGR, FPS, FRAME_H, FRAME_W, PX_PER_M, REF_COLOR_BGR,
     TEAM_A_COLOR_BGR, TEAM_B_COLOR_BGR, pitch_background,
 )
 from src.run_pipeline import run_pipeline
+
+# Dim gray, distinct from both team colors, referee yellow, and ball orange --
+# a "non_player" (crowd/sideline/bench, see src/perception/pipeline.py's
+# pitch-boundary filter) drawn in its own color rather than silently
+# inheriting a team color it no longer represents.
+NON_PLAYER_COLOR_BGR = (130, 130, 130)
+_CLS_LABEL = {"player": "PLAYER", "referee": "REFEREE", "non_player": "NON-PLAYER"}
 
 SYNTHETIC_CLIP_PATH = "data/raw/synthetic_match_clip.mp4"
 
@@ -67,6 +76,8 @@ def _color_for(cls: str, team: str | None) -> tuple:
         return BALL_COLOR_BGR
     if cls == "referee":
         return REF_COLOR_BGR
+    if cls == "non_player":
+        return NON_PLAYER_COLOR_BGR
     return _TEAM_COLOR.get(team, (200, 200, 200))
 
 
@@ -78,6 +89,8 @@ def _draw_events_and_alert(frame: np.ndarray, t_s: float, events: list[dict],
             label = _EVENT_LABEL.get(e["type"], e["type"].upper())
             if e["type"] == "foul" and e.get("triggers"):
                 label += f" [{'+'.join(e['triggers'])}]"
+            if e["type"] == "foul" and e.get("severity"):
+                label += f" severity={e['severity']}"
             color = _EVENT_COLOR.get(e["type"], (255, 255, 255))
             cv2.putText(frame, f"{label}  t={e['time_s']:.1f}s", (10, y_offset),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2, cv2.LINE_AA)
@@ -146,6 +159,13 @@ def _render_real_overlay(video_path: str, out_path: Path, result: dict | None = 
     alerts = result["review_alerts"]
     alert_time_s = min((a["goal_event"]["time_s"] for a in alerts), default=None)
 
+    # Severity is a Module C judgment (assess_foul_candidate), not part of
+    # run_events's own output -- computed once per foul event here rather
+    # than per frame, so the caption can show it alongside the trigger(s).
+    for e in events:
+        if e["type"] == "foul" and "closing_speed_mps" in e:
+            e["severity"] = assess_foul_candidate(e)["severity"]
+
     shots = scene_cut.split_into_shots(video_path)
     cut_frames = {start for start, _ in shots[1:]}  # shot 0's start (frame 0) isn't a "cut"
 
@@ -180,6 +200,12 @@ def _render_real_overlay(video_path: str, out_path: Path, result: dict | None = 
                 color = _color_for(row["cls"], row["team"])
                 x1, y1, x2, y2 = int(row["box_x1"]), int(row["box_y1"]), int(row["box_x2"]), int(row["box_y2"])
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                cls_label = _CLS_LABEL.get(row["cls"])
+                if cls_label is not None:
+                    if pd.notna(row["team"]):
+                        cls_label += f" {row['team']}"
+                    cv2.putText(frame, cls_label, (x1, max(0, y1 - 18)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
                 if row["cls"] == "player":
                     cv2.putText(frame, f"{row['speed_mps']:.1f} m/s", (x1, max(0, y1 - 5)),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
