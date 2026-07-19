@@ -41,6 +41,12 @@ reports/figures/*demo*.mp4
 # to plain pretrained COCO weights if the file isn't present.
 *.pt
 
+# weights/player_classifier.pkl (notebooks/train_player_classifier.py):
+# a logistic-regression head trained on crops from real SoccerNet broadcast
+# footage -- same redistribution concern as the raw clips themselves. Run
+# the training script against your own local clips to regenerate it.
+*.pkl
+
 # Vector store persistence (Module C)
 .chroma/
 *.index
