@@ -6,7 +6,7 @@ one short clip, per the project spec section 3.
 """
 from __future__ import annotations
 
-from src.assistant.explain import explain_review_alert
+from src.assistant.explain import explain_foul_candidate, explain_review_alert
 from src.events.pipeline import run_events
 from src.lineage.graph import build_lineage_graph, find_review_alerts
 from src.metrics.pipeline import run_metrics
@@ -57,6 +57,17 @@ if __name__ == "__main__":
           f"({sum(1 for e in result['events'] if e['type'] == 'foul')} foul candidates)")
     print(f"Layer 4: pitch control grid shape = {result['predictive']['pitch_control_at_goal'].shape}")
     print(f"Module A: {n_alerts} review alert(s) raised")
+
+    # Module C previously only ever explained goal-tied review alerts
+    # (below) -- a real foul candidate with no goal attached (the common
+    # case) never got a grounded explanation at all, even when Layer 3
+    # correctly found and annotated it (2026-07-18 fix). Every foul event
+    # now gets its own verdict, independent of whether Module A also
+    # raised an alert for it.
+    for event in result["events"]:
+        if event["type"] == "foul":
+            print("\n" + "=" * 70)
+            print(explain_foul_candidate(event))
 
     for alert in result["review_alerts"]:
         print("\n" + "=" * 70)

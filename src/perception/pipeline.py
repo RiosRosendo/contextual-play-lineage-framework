@@ -28,6 +28,58 @@ _SHOT_TRACK_ID_STRIDE = 100_000  # keeps track_ids globally unique across shots
 # broadcast's projected pitch coordinates sit well beyond this.
 SIDELINE_MARGIN_M = 5.0
 
+# Goalkeeper-as-referee correction (2026-07-18): TeamColorAnchor's
+# population-size referee heuristic (team_id.py) has a real blind spot --
+# a goalkeeper's kit is ALSO deliberately distinct from both outfield
+# teams' (IFAB Law 4), so it can just as easily be the smallest bootstrap
+# color cluster as the real referee is. Confirmed directly on
+# foul_leicester_mancity.mp4: track 13, labeled "referee", is visibly the
+# Man City goalkeeper standing in his own goal mouth (white kit) -- the
+# real referee (cyan kit) is a separate, correctly-labeled detection
+# nearby. Color alone can't distinguish the two (both are legitimately
+# singleton, distinct-color clusters at bootstrap time) -- but POSITION
+# can: a real referee ranges across the whole pitch following play, while
+# a goalkeeper spends the large majority of their time within their own
+# defensive zone. Confirmed empirically on the same clip: the real
+# goalkeeper tracks (13, 57) stay within 25m of one goal line for
+# 100%/~75%+ of their own-calibration rows respectively; the two genuine
+# referee tracks (12, 59) never come within 35m of either goal line at
+# all. GK_MIN_ROWS avoids reclassifying a short, noisy track from a
+# handful of frames (e.g. a referee standing still near a goal for one
+# set piece).
+GK_ZONE_M = 25.0
+GK_ZONE_MIN_FRACTION = 0.7
+GK_MIN_ROWS = 15
+
+
+def _reclassify_goalkeepers(df: pd.DataFrame) -> pd.DataFrame:
+    """Re-labels any `"referee"`-cls track that is positionally a
+    goalkeeper (see the constants above) back to `"player"`, on whichever
+    team's goal it's confined near, and tags it `is_goalkeeper=True` --
+    a real, usable signal for downstream consumers rather than a guess
+    (e.g. handball legality, an already-documented open gap: see
+    pose_signals.py's handball docstring, "goalkeepers... are not
+    distinguishable from outfield players yet"). Only uses
+    `calib_source == "own"` rows for the positional check, so an
+    unreliable position doesn't drive a reclassification decision."""
+    df["is_goalkeeper"] = False
+    if "cls" not in df.columns or df.empty:
+        return df
+    pitch_length = pitch_calibration_cv.PITCH_LENGTH_M
+    for track_id in df.loc[df["cls"] == "referee", "track_id"].unique():
+        mask = df["track_id"] == track_id
+        reliable = df.loc[mask & (df["calib_source"] == "own")]
+        if len(reliable) < GK_MIN_ROWS:
+            continue
+        in_zone = (reliable["x"] <= GK_ZONE_M) | (reliable["x"] >= pitch_length - GK_ZONE_M)
+        if in_zone.mean() < GK_ZONE_MIN_FRACTION:
+            continue
+        team = "team_a" if reliable["x"].mean() < pitch_length / 2 else "team_b"
+        df.loc[mask, "cls"] = "player"
+        df.loc[mask, "team"] = team
+        df.loc[mask, "is_goalkeeper"] = True
+    return df
+
 
 def _run_color_backend(video_path: str, calibrator: PitchCalibrator) -> pd.DataFrame:
     cap = cv2.VideoCapture(video_path)
@@ -54,7 +106,9 @@ def _run_color_backend(video_path: str, calibrator: PitchCalibrator) -> pd.DataF
             })
         frame_idx += 1
     cap.release()
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    df["is_goalkeeper"] = False  # schema symmetry with the yolo backend; not modeled in the synthetic clip
+    return df
 
 
 def _run_yolo_backend_shot(video_path: str, calibrator: PitchCalibrator, fps: float,
@@ -252,7 +306,7 @@ def _run_yolo_backend(video_path: str, frame_w: int, frame_h: int) -> pd.DataFra
         )
         rows.extend(shot_rows)
     print(f"Perception (yolo backend) done: {processed}/{total_frames} frames processed.")
-    return pd.DataFrame(rows)
+    return _reclassify_goalkeepers(pd.DataFrame(rows))
 
 
 def run_perception(video_path: str, backend: str = "color") -> pd.DataFrame:
