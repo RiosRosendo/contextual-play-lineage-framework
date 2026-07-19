@@ -12,7 +12,9 @@ from __future__ import annotations
 import cv2
 import pandas as pd
 
-from src.perception import color_detector, pitch_calibration_cv, pose_estimator, scene_cut, team_id, yolo_detector
+from src.perception import (
+    color_detector, pitch_calibration_cv, player_classifier, pose_estimator, scene_cut, team_id, yolo_detector,
+)
 from src.perception.bytetrack_lite import ByteTrackLite
 from src.perception.calibration import PitchCalibrator
 
@@ -50,6 +52,14 @@ SIDELINE_MARGIN_M = 5.0
 GK_ZONE_M = 25.0
 GK_ZONE_MIN_FRACTION = 0.7
 GK_MIN_ROWS = 15
+
+# Box-size anomaly guard for the appearance classifier (2026-07-19): a
+# row's box height must fall within this multiple of that same track's
+# own median box height elsewhere in the clip for the appearance check to
+# be trusted at all -- see `_run_pose_pass2`'s docstring for the concrete
+# case (a real player's box corrupted/oversized during a violent tackle,
+# fed to the classifier, confidently misread as crowd).
+BOX_SIZE_ANOMALY_RATIO = 1.6
 
 
 def _reclassify_goalkeepers(df: pd.DataFrame) -> pd.DataFrame:
@@ -263,13 +273,48 @@ def _run_pose_pass2(video_path: str, df: pd.DataFrame, windows: list[tuple[float
     know windowing happened at all. Reuses Pass 1's own tracked boxes for
     each frame (via `df`) rather than re-running the primary YOLO
     detector -- Pass 2 only ever ADDS pose data on top of Pass 1's
-    detection/tracking/team-ID decisions, it never revises them."""
+    detection/tracking/team-ID decisions, it never revises them.
+
+    Also re-applies the appearance-based player/non-player classifier
+    (`player_classifier.py`, built and validated 2026-07-18, previously
+    reverted from the pipeline) inside these same windows -- STRICTLY as
+    a post-hoc relabeling of `cls`/`team`, never by calling
+    `TeamColorAnchor.assign()` again. This is what makes it safe this
+    time: Pass 1 already ran its ENTIRE team-color bootstrap/EMA
+    evolution for the whole clip before Pass 2 ever starts (the two
+    passes are sequential, not interleaved), so there is no live
+    `TeamColorAnchor` state left for Pass 2 to touch at all -- last
+    session's regression (filtering which crops fed `team_anchor.assign`
+    shifted its own centroid evolution and cost the Swansea flagship
+    catch elsewhere in the clip) structurally cannot recur here, since
+    this function never calls `assign` a second time.
+
+    Box-size anomaly guard (2026-07-19): re-validation on Chelsea-Burnley
+    found the appearance classifier confidently (P(player)=0.003) but
+    WRONGLY excluded one of the two real flagship tackle participants --
+    traced directly to that row's own box being corrupted/oversized
+    during the chaotic tackle, so the crop was dominated by background
+    crowd with only a sliver of the real player visible. This is the same
+    "real contact corrupts box geometry" phenomenon already documented
+    elsewhere in this project (speed, aspect ratio) manifesting through a
+    new pathway -- not a classifier generalization failure, since the
+    crop genuinely looks like crowd. No confidence threshold fixes a
+    reading this confidently wrong, so instead: skip the appearance check
+    entirely for a row whose box height is a sudden outlier vs. that same
+    track's own median box height elsewhere in the clip (BOX_SIZE_ANOMALY_RATIO)
+    -- "too corrupted to trust either way," the same abstain-rather-than-
+    guess spirit already used throughout this project, rather than acting
+    on a classification of a box that likely isn't showing what Layer 1
+    thinks it's showing."""
     for name in pose_estimator.KEYPOINT_NAMES:
         df[f"kp_{name}_x"] = float("nan")
         df[f"kp_{name}_y"] = float("nan")
         df[f"kp_{name}_c"] = float("nan")
     if not windows or df.empty:
         return df
+
+    track_median_height = (df["box_y2"] - df["box_y1"]).groupby(df["track_id"]).transform("median")
+    df["_median_box_height"] = track_median_height
 
     cap = cv2.VideoCapture(video_path)
     for t_start, t_end in windows:
@@ -295,7 +340,24 @@ def _run_pose_pass2(video_path: str, df: pd.DataFrame, windows: list[tuple[float
                     df.at[row_index, f"kp_{name}_x"] = float(kpts[k_i][0])
                     df.at[row_index, f"kp_{name}_y"] = float(kpts[k_i][1])
                     df.at[row_index, f"kp_{name}_c"] = float(kpts[k_i][2])
+
+            appearance_ok = player_classifier.classify_boxes(frame, person_box_tuples)
+            if appearance_ok is None:
+                continue  # classifier not trained in this checkout -- no-op, same as before this change
+            for row_index, ok_appearance, box in zip(frame_rows.index, appearance_ok, person_box_tuples):
+                if ok_appearance or df.at[row_index, "cls"] not in ("player", "low_confidence"):
+                    continue
+                median_h = df.at[row_index, "_median_box_height"]
+                box_h = box[3] - box[1]
+                if pd.notna(median_h) and median_h > 0 and (
+                    box_h > BOX_SIZE_ANOMALY_RATIO * median_h or box_h < median_h / BOX_SIZE_ANOMALY_RATIO
+                ):
+                    continue  # box is a size outlier for this track -- don't trust the crop either way
+                df.at[row_index, "cls"] = "non_player"
+                df.at[row_index, "team"] = None
+                df.at[row_index, "is_goalkeeper"] = False
     cap.release()
+    df.drop(columns=["_median_box_height"], inplace=True)
     return df
 
 
