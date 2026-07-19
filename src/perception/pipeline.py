@@ -115,9 +115,16 @@ def _run_yolo_backend_shot(video_path: str, calibrator: PitchCalibrator, fps: fl
                             start_frame: int, end_frame: int, track_id_offset: int,
                             team_anchor: team_id.TeamColorAnchor, calib_source: str,
                             processed_so_far: int, total_frames: int) -> tuple[list[dict], int]:
-    """Runs detection + team ID + tracking over a single shot's frame range
-    only. A fresh tracker is used per shot -- track identity across a cut
-    is meaningless (it's a different framing, possibly a different part of
+    """Pass 1 of the two-pass (VAR-style) architecture (2026-07-18, see
+    reports/two_pass_architecture_scoping.md): detection + team ID +
+    tracking over a single shot's frame range, deliberately WITHOUT pose
+    estimation -- that's the expensive half of what this function used to
+    do unconditionally on every frame, and it now only runs inside the
+    short review windows Pass 1's own output flags (`_run_pose_pass2`,
+    called once per clip after every shot's Pass-1 rows are assembled).
+
+    A fresh tracker is used per shot -- track identity across a cut is
+    meaningless (it's a different framing, possibly a different part of
     the pitch or a different subject entirely), so continuing the same
     tracker across a cut would silently associate unrelated detections.
 
@@ -147,19 +154,11 @@ def _run_yolo_backend_shot(video_path: str, calibrator: PitchCalibrator, fps: fl
                 person_box_tuples.append((b.x1, b.y1, b.x2, b.y2))
         team_labels = team_anchor.assign(torso_colors, person_box_tuples) if torso_colors else []
 
-        # Second (dual-pass) inference: full-body keypoints, matched onto the
-        # primary detector's person boxes by IoU. The primary detector keeps
-        # sole authority over which detections exist -- a person box with no
-        # acceptable pose match just gets no keypoints this frame.
-        pose_detections = pose_estimator.estimate_frame(frame) if person_box_tuples else []
-        keypoints_per_person = pose_estimator.associate_keypoints(person_box_tuples, pose_detections)
-
         det_dicts = []
         person_i = 0
         for b in boxes:
             if b.cls == "person":
                 label = team_labels[person_i]
-                keypoints = keypoints_per_person[person_i]
                 person_i += 1
                 if label == 2:
                     # Referee (see TeamColorAnchor): a distinct tracker
@@ -171,10 +170,9 @@ def _run_yolo_backend_shot(video_path: str, calibrator: PitchCalibrator, fps: fl
                     det_cls = "person"
                     team = None if label is None else f"team_{'a' if label == 0 else 'b'}"
             else:
-                det_cls, team, keypoints = b.cls, None, None
+                det_cls, team = b.cls, None
             det_dicts.append({
                 "cls": det_cls, "team": team, "box": (b.x1, b.y1, b.x2, b.y2), "conf": b.conf,
-                "keypoints": keypoints,
             })
 
         tracked = tracker.update(det_dicts)
@@ -212,20 +210,11 @@ def _run_yolo_backend_shot(video_path: str, calibrator: PitchCalibrator, fps: fl
                 "x": x_m, "y": y_m, "conf": t["conf"], "calib_source": calib_source,
                 "box_x1": t["box"][0], "box_y1": t["box"][1], "box_x2": t["box"][2], "box_y2": t["box"][3],
             }
-            # Flat per-joint columns (kp_<name>_x/_y/_c, NaN when no skeleton
-            # was matched) rather than one nested-array column: flat floats
-            # survive the pandas -> Polars -> DuckDB path in Module B
-            # unchanged and vectorize cleanly for the pose-signal queries.
-            kpts = t.get("keypoints")
-            for k_i, name in enumerate(pose_estimator.KEYPOINT_NAMES):
-                if kpts is not None:
-                    row[f"kp_{name}_x"] = float(kpts[k_i][0])
-                    row[f"kp_{name}_y"] = float(kpts[k_i][1])
-                    row[f"kp_{name}_c"] = float(kpts[k_i][2])
-                else:
-                    row[f"kp_{name}_x"] = float("nan")
-                    row[f"kp_{name}_y"] = float("nan")
-                    row[f"kp_{name}_c"] = float("nan")
+            # kp_<name>_x/_y/_c columns are added afterward, for every row,
+            # by `_run_pose_pass2` -- NaN outside a Pass-1-flagged review
+            # window, real values inside one. Not populated here at all
+            # (Pass 1 never calls the pose model), unlike before this
+            # session's two-pass split.
             rows.append(row)
 
         processed += 1
@@ -251,6 +240,63 @@ def _calibrate_shot_own(video_path: str, start_frame: int) -> PitchCalibrator | 
     boxes = yolo_detector.detect_frame(frame, start_frame)
     person_boxes = [(b.x1, b.y1, b.x2, b.y2) for b in boxes if b.cls == "person"]
     return pitch_calibration_cv.calibrate_frame(frame, person_boxes)
+
+
+def _run_pose_pass2(video_path: str, df: pd.DataFrame, windows: list[tuple[float, float]], fps: float) -> pd.DataFrame:
+    """Pass 2 of the two-pass (VAR-style) architecture (2026-07-18, see
+    reports/two_pass_architecture_scoping.md): re-opens the clip and runs
+    the dual-pass pose estimator ONLY on frames inside `windows` (Pass 1's
+    flagged review windows), instead of unconditionally on every frame --
+    this is where the redesign's compute savings come from, since pose
+    estimation was the expensive half of what Layer 1 used to do on every
+    single frame regardless of whether anything worth reviewing happened
+    there.
+
+    Adds the kp_<joint>_x/_y/_c columns to the FULL dataframe (NaN
+    everywhere outside a window) -- the exact schema the yolo backend
+    always produced, so every existing downstream consumer (contact_types,
+    torso-fall, handball, sprint/jump analytics) works completely
+    unchanged: each of those already treats a missing/NaN keypoint as "no
+    data for this row" (confirmed directly -- e.g. `_torso_fall_runs`
+    checks `"kp_l_shoulder_x" not in df.columns`, `contact_type_events`
+    checks `"kp_nose_x" not in players.columns`), so none of them need to
+    know windowing happened at all. Reuses Pass 1's own tracked boxes for
+    each frame (via `df`) rather than re-running the primary YOLO
+    detector -- Pass 2 only ever ADDS pose data on top of Pass 1's
+    detection/tracking/team-ID decisions, it never revises them."""
+    for name in pose_estimator.KEYPOINT_NAMES:
+        df[f"kp_{name}_x"] = float("nan")
+        df[f"kp_{name}_y"] = float("nan")
+        df[f"kp_{name}_c"] = float("nan")
+    if not windows or df.empty:
+        return df
+
+    cap = cv2.VideoCapture(video_path)
+    for t_start, t_end in windows:
+        f_start = max(0, int(round(t_start * fps)))
+        f_end = int(round(t_end * fps)) + 1
+        cap.set(cv2.CAP_PROP_POS_FRAMES, f_start)
+        for frame_idx in range(f_start, f_end):
+            ok, frame = cap.read()
+            if not ok:
+                break
+            frame_rows = df[(df["frame"] == frame_idx) & (df["cls"] != "ball")]
+            if frame_rows.empty:
+                continue
+            person_box_tuples = list(zip(
+                frame_rows["box_x1"], frame_rows["box_y1"], frame_rows["box_x2"], frame_rows["box_y2"],
+            ))
+            pose_detections = pose_estimator.estimate_frame(frame)
+            keypoints_per_person = pose_estimator.associate_keypoints(person_box_tuples, pose_detections)
+            for row_index, kpts in zip(frame_rows.index, keypoints_per_person):
+                if kpts is None:
+                    continue
+                for k_i, name in enumerate(pose_estimator.KEYPOINT_NAMES):
+                    df.at[row_index, f"kp_{name}_x"] = float(kpts[k_i][0])
+                    df.at[row_index, f"kp_{name}_y"] = float(kpts[k_i][1])
+                    df.at[row_index, f"kp_{name}_c"] = float(kpts[k_i][2])
+    cap.release()
+    return df
 
 
 def _run_yolo_backend(video_path: str, frame_w: int, frame_h: int) -> pd.DataFrame:
@@ -306,7 +352,31 @@ def _run_yolo_backend(video_path: str, frame_w: int, frame_h: int) -> pd.DataFra
         )
         rows.extend(shot_rows)
     print(f"Perception (yolo backend) done: {processed}/{total_frames} frames processed.")
-    return _reclassify_goalkeepers(pd.DataFrame(rows))
+    df = _reclassify_goalkeepers(pd.DataFrame(rows))
+
+    # Two-pass (VAR-style) architecture (2026-07-18, see
+    # reports/two_pass_architecture_scoping.md): Pass 1 above is
+    # deliberately pose-free -- `find_review_windows` scans its cheap,
+    # box-only output (distance/speed + box-aspect-ratio collapse, both
+    # already established Layer 3 signals) for short windows worth a
+    # closer look, and only THOSE windows get the expensive dual-pass
+    # pose estimation Layer 3's pose-dependent triggers need.
+    #
+    # `_distance_speed_candidates` needs a `speed_mps` column, which is
+    # normally a Layer 2 quantity (src/metrics/physical.py) computed AFTER
+    # Layer 1 returns -- doesn't exist yet at this point in the pipeline.
+    # Borrows that same pure finite-difference calculation for a LOCAL,
+    # throwaway copy used only to decide review windows; the real `df`
+    # returned to callers is untouched (Layer 2 computes its own
+    # `speed_mps` on it the normal way, identically, when `run_metrics`
+    # runs next -- this is not a layering shortcut, just reusing one
+    # already-cheap, model-free utility function instead of duplicating
+    # its math here).
+    from src.events.foul_detector.review_windows import find_review_windows
+    from src.metrics.physical import add_physical_metrics
+    windows = find_review_windows(add_physical_metrics(df))
+    print(f"Pass 1 flagged {len(windows)} review window(s) for Pass 2's pose analysis.")
+    return _run_pose_pass2(video_path, df, windows, fps)
 
 
 def run_perception(video_path: str, backend: str = "color") -> pd.DataFrame:
