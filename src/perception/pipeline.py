@@ -13,7 +13,8 @@ import cv2
 import pandas as pd
 
 from src.perception import (
-    color_detector, pitch_calibration_cv, player_classifier, pose_estimator, scene_cut, team_id, yolo_detector,
+    color_detector, kit_pattern_classifier, pitch_calibration_cv, player_classifier, pose_estimator, scene_cut,
+    team_id, yolo_detector,
 )
 from src.perception.bytetrack_lite import ByteTrackLite
 from src.perception.calibration import PitchCalibrator
@@ -162,7 +163,13 @@ def _run_yolo_backend_shot(video_path: str, calibrator: PitchCalibrator, fps: fl
             if b.cls == "person":
                 torso_colors.append(team_id.torso_crop_mean_color(frame, b.x1, b.y1, b.x2, b.y2))
                 person_box_tuples.append((b.x1, b.y1, b.x2, b.y2))
-        team_labels = team_anchor.assign(torso_colors, person_box_tuples) if torso_colors else []
+        # Hard domain constraint (2026-07-19): a patterned/striped kit
+        # crop can never be a real referee (IFAB Law 4) -- see
+        # kit_pattern_classifier.py and TeamColorAnchor.assign's own
+        # docstring for why this is a trained classifier, not a
+        # hand-crafted color statistic.
+        patterned_flags = kit_pattern_classifier.classify_boxes(frame, person_box_tuples)
+        team_labels = team_anchor.assign(torso_colors, person_box_tuples, patterned_flags) if torso_colors else []
 
         det_dicts = []
         person_i = 0

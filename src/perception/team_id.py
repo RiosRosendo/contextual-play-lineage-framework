@@ -123,11 +123,29 @@ class TeamColorAnchor:
                     occluded[i] = occluded[j] = True
         return occluded
 
-    def assign(self, torso_colors: list[np.ndarray], boxes: list[tuple] | None = None) -> list[int | None]:
+    def assign(self, torso_colors: list[np.ndarray], boxes: list[tuple] | None = None,
+               patterned: list[bool] | None = None) -> list[int | None]:
         """`boxes` (same order/length as `torso_colors`, each an (x1,y1,x2,y2)
         tuple) is optional but should be passed whenever available -- it's
         what makes the occlusion check possible. Without it, only the
         minimum-separation check applies.
+
+        `patterned` (2026-07-19, same order/length as `torso_colors`) is a
+        hard domain constraint: real referees never wear striped/patterned
+        kits (IFAB Law 4), so a crop flagged `True` here can NEVER be
+        classified as referee (label 2), regardless of its color-distance
+        to the referee centroid -- confirmed necessary directly, not
+        assumed: Athletic Bilbao's and Hull City's striped kits were both
+        found confidently misclassified as referee purely on color
+        distance, on two independent real clips. See
+        `kit_pattern_classifier.py` for why this is a trained classifier
+        rather than a hand-crafted statistic (5 cheap proxies tried and
+        empirically failed to separate genuine referees from patterned
+        kits first). Applied at BOTH bootstrap (so a patterned team's
+        fragment can't be mistaken for the referee cluster in the first
+        place) and at per-frame classification (so a patterned sample is
+        never assigned to the referee cluster afterward either) --
+        omitting either half would leave the other route open.
 
         Returns, per input color: 0 (team_a), 1 (team_b), 2 (referee), or
         None -- either not enough trusted samples exist yet to bootstrap
@@ -138,9 +156,12 @@ class TeamColorAnchor:
         x = np.stack(torso_colors)
         n = len(torso_colors)
         occluded = self._occluded_mask(boxes, n)
+        patterned_arr = np.array(patterned, dtype=bool) if patterned is not None else np.zeros(n, dtype=bool)
 
         if self.centroids is None:
-            trusted = x[~occluded] if np.any(~occluded) else x
+            trust_mask = ~occluded
+            trusted = x[trust_mask] if np.any(trust_mask) else x
+            trusted_patterned = patterned_arr[trust_mask] if np.any(trust_mask) else patterned_arr
             if len(trusted) < self.MIN_BOOTSTRAP_SAMPLES:
                 return [None] * n  # not enough people yet to safely separate 2 teams + a referee
             labels_trusted = KMeans(n_clusters=3, n_init=4, random_state=0).fit_predict(trusted)
@@ -149,7 +170,20 @@ class TeamColorAnchor:
             # bootstrap sample -- color alone can't say *which* cluster is
             # the referee (a dark team kit clusters the same as a dark
             # referee kit), but population size can (see class docstring).
-            referee_cluster = int(np.argmin(counts))
+            # Population-size candidates are tried smallest-first, but any
+            # cluster that's MOSTLY patterned samples is skipped -- it's
+            # more likely a small-in-this-sample fragment of a patterned
+            # team than genuine referee crops (a patterned team's own
+            # smallest subset, not a real singleton referee).
+            by_size = sorted(range(3), key=lambda k: counts[k])
+            referee_cluster = None
+            for k in by_size:
+                cluster_patterned_frac = trusted_patterned[labels_trusted == k].mean() if counts[k] else 1.0
+                if cluster_patterned_frac < 0.5:
+                    referee_cluster = k
+                    break
+            if referee_cluster is None:
+                referee_cluster = by_size[0]  # rare: every cluster looks patterned -- fall back rather than never bootstrap
             team_clusters = [k for k in range(3) if k != referee_cluster]
             self.centroids = np.array([
                 trusted[labels_trusted == team_clusters[0]].mean(axis=0),
@@ -165,6 +199,14 @@ class TeamColorAnchor:
         confident = d_sorted[:, 1] >= self.min_separation_ratio * np.maximum(d_sorted[:, 0], 1e-6)
         trust_sample = confident & ~occluded
         nearest = dists.argmin(axis=1)
+
+        # Hard veto: a patterned sample nearest to the referee centroid is
+        # reassigned to whichever TEAM centroid (0/1) is actually closer --
+        # it must never be allowed to read as referee, per this function's
+        # own docstring.
+        vetoed = patterned_arr & (nearest == 2)
+        if np.any(vetoed):
+            nearest[vetoed] = dists[vetoed][:, :2].argmin(axis=1)
 
         for k in range(3):
             assigned = x[trust_sample & (nearest == k)]
