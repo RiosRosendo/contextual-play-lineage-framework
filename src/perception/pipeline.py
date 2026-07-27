@@ -10,11 +10,12 @@ backends produce the same output schema so Layers 2-4 don't care which ran.
 from __future__ import annotations
 
 import cv2
+import numpy as np
 import pandas as pd
 
 from src.perception import (
-    color_detector, kit_pattern_classifier, pitch_calibration_cv, player_classifier, pose_estimator, scene_cut,
-    team_id, yolo_detector,
+    color_detector, kit_pattern_classifier, pitch_calibration_cv, player_classifier, pose_estimator,
+    roboflow_referee_detector, scene_cut, team_id, yolo_detector,
 )
 from src.perception.bytetrack_lite import ByteTrackLite
 from src.perception.calibration import PitchCalibrator
@@ -54,6 +55,43 @@ GK_ZONE_M = 25.0
 GK_ZONE_MIN_FRACTION = 0.7
 GK_MIN_ROWS = 15
 
+# Scale gate for the Roboflow referee/goalkeeper detector (2026-07-20): real
+# testing (see PROGRESS.md) found this second detector reliably fails --
+# missing real players entirely, or finding only tiny fragments -- once a
+# broadcast zooms in close (tackles, tangles), across every clip tested.
+# Root-caused to a shot-scale effect, not crowding: mean person-box area as
+# a fraction of frame area separated every "worked" frame (0.15-0.38%) from
+# every "failed" frame (3.8-16.8%) with a clean, zero-overlap gap. This
+# threshold sits in that gap -- comfortably below the failing range, so a
+# frame is only ever handed to the second detector when it's confidently a
+# wide/tactical shot, the framing that model was actually validated on.
+PERSON_BOX_MEAN_AREA_FRAC_THRESHOLD = 0.01
+
+# Box-quality gate for accepting a Roboflow match (2026-07-21): validation
+# on Arsenal-Anderlecht found a real `is_goalkeeper` false positive -- a
+# tiny (35x60px), low-quality sideline/crowd sliver, tracked pinned to the
+# frame's left edge (x1 in [0.0, 4.6] for its ENTIRE lifetime) got
+# IoU-matched to a Roboflow "goalkeeper" detection that was itself
+# genuinely confident (0.88) -- Roboflow's own confidence can't catch
+# this, since it's confidently reading a REAL goalkeeper-shaped person
+# elsewhere; the primary detector's box is what's unreliable here. Checked
+# directly against every confirmed-correct match this project has found
+# (Chelsea-Burnley's referee, conf 0.65-0.77, no edge contact; Leicester's
+# goalkeeper, conf 0.55-0.75, no edge contact): both comfortably clear a
+# minimum-confidence bar AND never touch a frame boundary, while the bad
+# case fails the edge check specifically (confidence alone overlaps too
+# much with genuine cases, 0.46-0.73, to be a clean discriminator by
+# itself). A primary-detector box this pinned to a frame edge is a classic
+# partial/clipped-detection signal (a person, sign, or object straddling
+# the frame boundary), independent of whatever Roboflow thinks is there.
+# Does NOT address every known Roboflow error -- the Anderlecht purple-kit
+# false referee (2026-07-20) is a confident, well-formed, WRONG call by
+# Roboflow itself (checked directly, conf 0.79, no edge contact) that no
+# primary-box-quality check can catch; that remains a disclosed, open
+# limitation of the model, not something this gate is meant to fix.
+ROBOFLOW_MATCH_MIN_PRIMARY_CONF = 0.4
+ROBOFLOW_MATCH_FRAME_EDGE_MARGIN_PX = 2.0
+
 # Box-size anomaly guard for the appearance classifier (2026-07-19): a
 # row's box height must fall within this multiple of that same track's
 # own median box height elsewhere in the clip for the appearance check to
@@ -72,8 +110,18 @@ def _reclassify_goalkeepers(df: pd.DataFrame) -> pd.DataFrame:
     pose_signals.py's handball docstring, "goalkeepers... are not
     distinguishable from outfield players yet"). Only uses
     `calib_source == "own"` rows for the positional check, so an
-    unreliable position doesn't drive a reclassification decision."""
-    df["is_goalkeeper"] = False
+    unreliable position doesn't drive a reclassification decision.
+
+    2026-07-20: `is_goalkeeper` may already be `True` on some rows here --
+    the Roboflow referee/goalkeeper detector (see `roboflow_referee_detector.py`)
+    can confirm a goalkeeper directly on wide-shot frames, bypassing this
+    positional heuristic entirely for those rows. Only initializes the
+    column where it doesn't already exist, so those pre-set values survive;
+    this function still runs its own positional check afterward for
+    whatever that second detector didn't catch (e.g. close/zoomed frames
+    its scale gate excluded it from)."""
+    if "is_goalkeeper" not in df.columns:
+        df["is_goalkeeper"] = False
     if "cls" not in df.columns or df.empty:
         return df
     pitch_length = pitch_calibration_cv.PITCH_LENGTH_M
@@ -158,11 +206,54 @@ def _run_yolo_backend_shot(video_path: str, calibrator: PitchCalibrator, fps: fl
         if not ok:
             break
         boxes = yolo_detector.detect_frame(frame, frame_idx)
-        torso_colors, person_box_tuples = [], []
+        torso_colors, person_box_tuples, person_confs = [], [], []
         for b in boxes:
             if b.cls == "person":
                 torso_colors.append(team_id.torso_crop_mean_color(frame, b.x1, b.y1, b.x2, b.y2))
                 person_box_tuples.append((b.x1, b.y1, b.x2, b.y2))
+                person_confs.append(b.conf)
+
+        # Second opinion from the Roboflow referee/goalkeeper detector
+        # (2026-07-20) -- only on frames confidently wide enough for it to
+        # be reliable (see PERSON_BOX_MEAN_AREA_FRAC_THRESHOLD's comment).
+        # Box EXISTENCE always stays with the primary detector above; this
+        # only ever relabels boxes that already exist.
+        if person_box_tuples:
+            frame_area = frame.shape[0] * frame.shape[1]
+            mean_area_frac = sum(
+                (x2 - x1) * (y2 - y1) for x1, y1, x2, y2 in person_box_tuples
+            ) / len(person_box_tuples) / frame_area
+        else:
+            mean_area_frac = 0.0
+        if person_box_tuples and mean_area_frac < PERSON_BOX_MEAN_AREA_FRAC_THRESHOLD:
+            roboflow_labels = roboflow_referee_detector.classify_boxes(frame, person_box_tuples)
+        else:
+            roboflow_labels = [None] * len(person_box_tuples)
+
+        # Box-quality gate (2026-07-21, see ROBOFLOW_MATCH_MIN_PRIMARY_CONF's
+        # comment): a Roboflow match is only trusted for a box the PRIMARY
+        # detector itself is reasonably confident about and that isn't
+        # pinned to a frame edge (a classic partial/clipped-detection
+        # signal) -- Roboflow's own confidence can't catch this, since it
+        # can be genuinely confident about a real person elsewhere while
+        # the primary box it got IoU-matched to is the unreliable one.
+        frame_h, frame_w = frame.shape[0], frame.shape[1]
+        m = ROBOFLOW_MATCH_FRAME_EDGE_MARGIN_PX
+
+        def _box_quality_ok(box, conf):
+            x1, y1, x2, y2 = box
+            if conf < ROBOFLOW_MATCH_MIN_PRIMARY_CONF:
+                return False
+            return not (x1 <= m or y1 <= m or x2 >= frame_w - m or y2 >= frame_h - m)
+
+        roboflow_labels = [
+            rf if (rf is None or _box_quality_ok(box, conf)) else None
+            for rf, box, conf in zip(roboflow_labels, person_box_tuples, person_confs)
+        ]
+        referee_confirmed = [rf == "referee" for rf in roboflow_labels]
+        goalkeeper_confirmed = [rf == "goalkeeper" for rf in roboflow_labels]
+        non_referee_confirmed = [rf in ("player", "goalkeeper") for rf in roboflow_labels]
+
         # Hard domain constraint (2026-07-19): a patterned/striped kit
         # crop can never be a real referee (IFAB Law 4) -- see
         # kit_pattern_classifier.py and TeamColorAnchor.assign's own
@@ -171,11 +262,45 @@ def _run_yolo_backend_shot(video_path: str, calibrator: PitchCalibrator, fps: fl
         patterned_flags = kit_pattern_classifier.classify_boxes(frame, person_box_tuples)
         team_labels = team_anchor.assign(torso_colors, person_box_tuples, patterned_flags) if torso_colors else []
 
+        # Roboflow override (2026-07-20): applied strictly AFTER
+        # TeamColorAnchor's own call above, as a pure post-hoc relabel --
+        # never changes what TeamColorAnchor itself sees or learns from,
+        # so its own bootstrap/EMA centroid evolution is completely
+        # undisturbed. This is the same safe pattern already proven for
+        # the appearance classifier in Pass 2 (see `_run_pose_pass2`'s
+        # docstring). A first version of this instead EXCLUDED
+        # Roboflow-confirmed-referee samples from TeamColorAnchor's input
+        # entirely -- validation on Leicester-Man City found this starved
+        # TeamColorAnchor's own referee-detection logic (built last
+        # session) of exactly the clean samples it needs, causing it to
+        # learn a WORSE centroid from noisier frames instead and
+        # misclassify far more real players as referee on frames Roboflow
+        # doesn't cover (referee rows 49->319, and the clip's 3
+        # previously-validated real foul catches disappeared as collateral
+        # damage). Never repeat that -- always let TeamColorAnchor process
+        # every sample unfiltered, then override only the OUTPUT label.
+        for i in range(len(person_box_tuples)):
+            if referee_confirmed[i]:
+                team_labels[i] = 2
+            elif non_referee_confirmed[i] and team_labels[i] == 2:
+                # TeamColorAnchor guessed referee but Roboflow confidently
+                # says otherwise -- reassign to whichever team's centroid
+                # is nearer, mirroring TeamColorAnchor's own patterned-veto
+                # reassignment logic.
+                if team_anchor.team_centroids is not None:
+                    c = torso_colors[i]
+                    d0 = float(np.linalg.norm(c - team_anchor.team_centroids[0]))
+                    d1 = float(np.linalg.norm(c - team_anchor.team_centroids[1]))
+                    team_labels[i] = 0 if d0 <= d1 else 1
+                else:
+                    team_labels[i] = None
+
         det_dicts = []
         person_i = 0
         for b in boxes:
             if b.cls == "person":
                 label = team_labels[person_i]
+                is_gk = goalkeeper_confirmed[person_i]
                 person_i += 1
                 if label == 2:
                     # Referee (see TeamColorAnchor): a distinct tracker
@@ -187,9 +312,10 @@ def _run_yolo_backend_shot(video_path: str, calibrator: PitchCalibrator, fps: fl
                     det_cls = "person"
                     team = None if label is None else f"team_{'a' if label == 0 else 'b'}"
             else:
-                det_cls, team = b.cls, None
+                det_cls, team, is_gk = b.cls, None, False
             det_dicts.append({
                 "cls": det_cls, "team": team, "box": (b.x1, b.y1, b.x2, b.y2), "conf": b.conf,
+                "is_goalkeeper": is_gk,
             })
 
         tracked = tracker.update(det_dicts)
@@ -226,6 +352,12 @@ def _run_yolo_backend_shot(video_path: str, calibrator: PitchCalibrator, fps: fl
                 "cls": cls, "team": t["team"],
                 "x": x_m, "y": y_m, "conf": t["conf"], "calib_source": calib_source,
                 "box_x1": t["box"][0], "box_y1": t["box"][1], "box_x2": t["box"][2], "box_y2": t["box"][3],
+                # Roboflow-confirmed goalkeeper (2026-07-20), when available --
+                # see `_reclassify_goalkeepers`, which now preserves this
+                # instead of resetting it, and still positionally promotes
+                # anything this second detector didn't catch (e.g. close/
+                # zoomed frames the scale gate excluded it from).
+                "is_goalkeeper": t.get("is_goalkeeper", False),
             }
             # kp_<name>_x/_y/_c columns are added afterward, for every row,
             # by `_run_pose_pass2` -- NaN outside a Pass-1-flagged review
