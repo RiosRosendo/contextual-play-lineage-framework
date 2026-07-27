@@ -15,6 +15,38 @@ GOAL_LINE_MARGIN_M = 2.0
 GOAL_MOUTH_Y = (30.34, 37.66)  # standard 7.32m goal width, centered on a 68m-wide pitch
 POSSESSION_DEBOUNCE_FRAMES = 3  # min consecutive frames before a nearest-player change counts
 
+# Shot trajectory-target gate (2026-07-20): real-footage validation
+# (Leicester-Man City) found the speed+distance-to-goal check above fires
+# on ordinary long passes and counter-attack transitions just as readily as
+# on real shots, since it only looks at the ball's CURRENT position, never
+# where its own flight is actually headed. Confirmed with real trajectory
+# data on two false-positive clusters: a long David Silva pass (t=4.28-
+# 4.64s, ball travels x=85->103 toward team_a's own goal line, fast enough
+# and close enough in x to qualify) and a Leicester counter-attack
+# transition (t=9.56-10.48s) -- in both, the ball's y stays at 38-54 the
+# entire time, nowhere near the 7.32m-wide real goal mouth (30.34-37.66),
+# because neither was ever actually aimed at goal. This gate extrapolates
+# each qualifying frame's own recent velocity (finite difference against
+# the previous ball detection) forward to the moment it would cross the
+# goal line, and requires that projected y to land near the goal mouth --
+# not just the ball's current (x, y). A shot heading just wide/over (a
+# real, missed shot) should still generally clear a padded margin around
+# the mouth's real width, hence SHOT_GOAL_MOUTH_MARGIN_M rather than the
+# bare GOAL_MOUTH_Y bounds.
+SHOT_GOAL_MOUTH_MARGIN_M = 3.0
+# A velocity sample spanning a gap this large between consecutive ball
+# detections is too stale to extrapolate from (the ball may have changed
+# direction entirely in between, e.g. a deflection) -- skip rather than
+# guess. Ball detection is intermittent (this project's own long-
+# documented ~28% frame coverage on real footage), so this needs to be
+# generous enough to still cover normal single-frame gaps.
+SHOT_MAX_VELOCITY_GAP_S = 0.5
+# Consecutive frames satisfying every shot condition within this gap are
+# one real shot attempt, not one event per frame -- mirrors this
+# project's existing GOAL_MIN_SUSTAINED_FRAMES/review-window-merge pattern
+# for turning a per-frame signal into one real event.
+SHOT_MERGE_GAP_S = 0.5
+
 # Goal-detection plausibility gate (2026-07-17): real-footage validation
 # (Leicester-Man City) found `detect_goal_events` firing on a single spurious
 # ball-position reading (x=-30.7, far outside any real pitch even with
@@ -98,24 +130,75 @@ def detect_possession_events(possession_df: pd.DataFrame, player_time_df: pd.Dat
                 })
         prev_team, prev_track = team, track_id
 
-    # Shot heuristic: ball moving fast and close to a goal mouth while a team
-    # has possession.
-    ball_df = player_time_df[player_time_df["cls"] == "ball"]
+    events += detect_shot_events(possession_df, player_time_df)
+
+    return sorted(events, key=lambda e: e["time_s"])
+
+
+def detect_shot_events(possession_df: pd.DataFrame, player_time_df: pd.DataFrame) -> list[dict]:
+    """Shot heuristic: ball moving fast and close to a goal mouth while a
+    team has possession, AND its own recent trajectory actually projects
+    into the goal mouth (not just its current position) -- see
+    SHOT_GOAL_MOUTH_MARGIN_M's comment for why the trajectory-target gate
+    was added. Consecutive qualifying frames are merged into one event
+    (SHOT_MERGE_GAP_S) -- one real shot attempt spans several ball
+    detections, not several distinct shots."""
+    ball_df = player_time_df[player_time_df["cls"] == "ball"].sort_values("time_s").reset_index(drop=True)
+    qualifying = []  # list of dicts: time_s, team, x, y, speed_mps
+    prev_row = None
     for _, row in ball_df.iterrows():
         t = row["time_s"]
         poss = possession_df[possession_df["time_s"] == t]
-        if poss.empty:
+        if poss.empty or prev_row is None:
+            prev_row = row
             continue
         team = poss.iloc[0]["possessing_team"]
         goal_x = _goal_mouth_x(team)
         dist_to_goal = abs(row["x"] - goal_x)
-        if row["speed_mps"] > SHOT_SPEED_THRESHOLD_MPS and dist_to_goal < SHOT_DIST_TO_GOAL_M:
-            events.append({
-                "type": "shot", "time_s": t, "team": team,
-                "location": (row["x"], row["y"]), "speed_mps": row["speed_mps"],
-            })
+        if not (row["speed_mps"] > SHOT_SPEED_THRESHOLD_MPS and dist_to_goal < SHOT_DIST_TO_GOAL_M):
+            prev_row = row
+            continue
 
-    return sorted(events, key=lambda e: e["time_s"])
+        dt = t - prev_row["time_s"]
+        dx, dy = row["x"] - prev_row["x"], row["y"] - prev_row["y"]
+        prev_row = row
+        if dt <= 0 or dt > SHOT_MAX_VELOCITY_GAP_S or dx == 0:
+            continue  # velocity sample too stale/degenerate to extrapolate from
+        moving_toward_goal = (dx > 0) == (goal_x > row["x"])
+        if not moving_toward_goal:
+            continue
+        t_to_goal = (goal_x - row["x"]) / (dx / dt)
+        projected_y = row["y"] + (dy / dt) * t_to_goal
+        if not (
+            GOAL_MOUTH_Y[0] - SHOT_GOAL_MOUTH_MARGIN_M <= projected_y <= GOAL_MOUTH_Y[1] + SHOT_GOAL_MOUTH_MARGIN_M
+        ):
+            continue  # this ball's own flight path isn't headed at the goal mouth at all
+
+        qualifying.append({
+            "time_s": t, "team": team, "x": row["x"], "y": row["y"], "speed_mps": row["speed_mps"],
+        })
+
+    if not qualifying:
+        return []
+
+    # Merge consecutive qualifying frames (within SHOT_MERGE_GAP_S) into one
+    # event, reported at that run's peak-speed frame -- the most
+    # representative instant of the shot itself.
+    runs: list[list[dict]] = [[qualifying[0]]]
+    for q in qualifying[1:]:
+        if q["time_s"] - runs[-1][-1]["time_s"] <= SHOT_MERGE_GAP_S:
+            runs[-1].append(q)
+        else:
+            runs.append([q])
+
+    shot_events = []
+    for run in runs:
+        peak = max(run, key=lambda q: q["speed_mps"])
+        shot_events.append({
+            "type": "shot", "time_s": peak["time_s"], "team": peak["team"],
+            "location": (peak["x"], peak["y"]), "speed_mps": peak["speed_mps"],
+        })
+    return shot_events
 
 
 def official_goal_event(time_s: float, team: str | None = None) -> dict:

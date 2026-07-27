@@ -98,13 +98,90 @@ class TeamColorAnchor:
     another detected player's box this frame (occlusion). `None` is
     already a valid, handled value for `team` everywhere downstream (ball
     and referee rows already carry it), so an honest "don't know" for one
-    frame is a normal case, not a new failure mode for callers to handle."""
+    frame is a normal case, not a new failure mode for callers to handle.
+
+    Referee-bootstrap contamination (2026-07-20): real-footage validation
+    (Chelsea-Burnley) found the population-size referee heuristic above
+    fails hard when the actual referee simply isn't in the bootstrap
+    frame at all -- confirmed directly by instrumenting this class: frame
+    0 held 8 people, all outfield players (4 v 4), yet k=3 still forced a
+    3-way split, and the smallest cluster (population 1) turned out to be
+    a real Burnley player who happened to read as a color outlier, not a
+    referee. His kit color then permanently seeded the referee centroid,
+    misclassifying genuine teammates throughout the rest of the clip
+    (confirmed on 3 independently-sampled tracks) while the real referee
+    (all-black kit, never captured as any reference color) was
+    misclassified onto a team instead. A second, independent instance of
+    the same mechanism was found on `foul_arsenal_anderlecht.mp4` (there
+    it happened to self-correct instead of persisting, previously
+    mis-attributed to generic "bootstrap instability").
+
+    Population size alone can't tell a genuine referee singleton apart
+    from a real team's own color-sampling outlier, but color
+    DISTINCTIVENESS can: a referee's kit is chosen specifically to not
+    clash with either team's, so a genuine referee cluster sits far from
+    BOTH team clusters -- typically farther than the two team clusters
+    sit from each other. A same-team outlier does not: checked directly
+    across all 6 locally-downloaded clips' own bootstrap frames, the
+    smallest cluster's distance to the nearer of the other two, as a
+    fraction of those other two's own mutual distance, is 1.683/0.838 on
+    Leicester/Swansea (both confirmed-correct real referee identifications)
+    versus 0.667/0.514 on Chelsea-Burnley/Arsenal-Anderlecht (both
+    confirmed-wrong, a same-team outlier) -- a clean gap between the two
+    groups. `REFEREE_MIN_DISTINCTIVENESS_RATIO` sits between them. A
+    candidate cluster/sample is only ever accepted as the referee if it
+    clears both this ratio AND the existing patterned-kit veto; when
+    nothing clears it yet, referee identification is deferred (team_a/
+    team_b bootstrap proceeds via k=2 alone, so team classification isn't
+    held up) and retried on every subsequent frame's samples against the
+    now-fixed team centroids, until some frame naturally contains a
+    confidently-distinct referee color (or never does, for the whole
+    clip -- an honest `None` for every frame rather than a permanent wrong
+    guess, consistent with this class's existing abstention philosophy)."""
 
     MIN_BOOTSTRAP_SAMPLES = 4  # need enough people to safely split into 2 teams + a referee singleton
+    REFEREE_MIN_DISTINCTIVENESS_RATIO = 0.8  # see class docstring for the 6-clip calibration behind this cut
+    # A second, real bug found on card_hull_arsenal.mp4 (2026-07-20): the
+    # ratio above is only meaningful when the two things being compared
+    # (the "other two" clusters, or the two team centroids) are themselves
+    # a reliable baseline. On a small/noisy bootstrap sample (this clip's
+    # first frame had only 4 trusted people, right at MIN_BOOTSTRAP_SAMPLES,
+    # with most of Hull's own patterned kit excluded from team formation
+    # entirely), the two resulting team centroids ended up only 31.0 apart
+    # -- close enough that an ORDINARY Arsenal player's own color still
+    # cleared the 0.8 ratio (25.4/31.0=0.819) purely because the
+    # denominator was small, not because he was genuinely referee-colored.
+    # Checked directly against every confirmed-good case: Leicester 38.7,
+    # clip20s 66.1, Chelsea-Burnley 70.8, Swansea 94.4 -- all comfortably
+    # separated from Hull-Arsenal's 31.0. This absolute floor is a second,
+    # independent guard alongside the ratio -- both must hold. Applied to
+    # the one-shot k=3 bootstrap attempt, where a full 3-cluster fit is
+    # already a fairly reliable computation in its own right.
+    MIN_TEAM_SEPARATION_FOR_REFEREE_CHECK = 35.0
+    # The ongoing per-frame deferred retry (below) needs a stricter floor
+    # than the one-shot bootstrap test: checked directly on Hull-Arsenal,
+    # team_centroids crossed 35.0 (the bootstrap floor) within ~1.4s of
+    # real time, but were still noisy enough (d_teams=36.1) that an
+    # ordinary Arsenal player passed the ratio there too -- a second,
+    # independent misclassification via the deferred path specifically,
+    # not the one-shot bootstrap path. Raising this deferred-only floor to
+    # 60.0 (team centroids given more real time/samples to mature via EMA
+    # before ever being trusted as a baseline) eliminated both false
+    # positives, at the honest cost of this specific clip's own referee
+    # almost never being confidently confirmed at all (a close-up-framing
+    # issue independent of this floor, see the module's dev notes) --
+    # preferred over confidently mislabeling real players, per this
+    # class's abstention philosophy.
+    MIN_TEAM_SEPARATION_FOR_DEFERRED_CHECK = 60.0
 
     def __init__(self, ema_alpha: float = 0.05, min_separation_ratio: float = 1.2,
                  overlap_iou_threshold: float = 0.1):
-        self.centroids: np.ndarray | None = None  # shape (3, 3), BGR: [team_a, team_b, referee]
+        # team_centroids: shape (2, 3) BGR [team_a, team_b], set once both
+        # teams bootstrap. referee_centroid: shape (3,) BGR, or None until
+        # a confidently-distinct referee color is found (see docstring) --
+        # no referee label (2) is ever returned by `assign` until then.
+        self.team_centroids: np.ndarray | None = None
+        self.referee_centroid: np.ndarray | None = None
         self.ema_alpha = ema_alpha
         # Nearest centroid must be at least this much closer than the next-
         # nearest for a sample to count as confidently classified -- 1.2
@@ -149,8 +226,11 @@ class TeamColorAnchor:
 
         Returns, per input color: 0 (team_a), 1 (team_b), 2 (referee), or
         None -- either not enough trusted samples exist yet to bootstrap
-        (fewer than MIN_BOOTSTRAP_SAMPLES), or this specific sample isn't
-        trustworthy (ambiguous or occluded, see the class docstring)."""
+        team_a/team_b (fewer than MIN_BOOTSTRAP_SAMPLES), this specific
+        sample isn't trustworthy (ambiguous or occluded, see the class
+        docstring), or a referee color hasn't been confidently identified
+        yet (see the class docstring's 2026-07-20 note) -- label 2 is
+        never returned until then."""
         if not torso_colors:
             return []
         x = np.stack(torso_colors)
@@ -158,59 +238,134 @@ class TeamColorAnchor:
         occluded = self._occluded_mask(boxes, n)
         patterned_arr = np.array(patterned, dtype=bool) if patterned is not None else np.zeros(n, dtype=bool)
 
-        if self.centroids is None:
+        if self.team_centroids is None:
             trust_mask = ~occluded
             trusted = x[trust_mask] if np.any(trust_mask) else x
             trusted_patterned = patterned_arr[trust_mask] if np.any(trust_mask) else patterned_arr
             if len(trusted) < self.MIN_BOOTSTRAP_SAMPLES:
-                return [None] * n  # not enough people yet to safely separate 2 teams + a referee
+                return [None] * n  # not enough people yet to safely bootstrap even 2 teams
             labels_trusted = KMeans(n_clusters=3, n_init=4, random_state=0).fit_predict(trusted)
             counts = [int(np.sum(labels_trusted == k)) for k in range(3)]
+            centroids_trusted = [trusted[labels_trusted == k].mean(axis=0) for k in range(3)]
             # The referee is 1 person against ~10-11 per team in a typical
-            # bootstrap sample -- color alone can't say *which* cluster is
-            # the referee (a dark team kit clusters the same as a dark
-            # referee kit), but population size can (see class docstring).
-            # Population-size candidates are tried smallest-first, but any
-            # cluster that's MOSTLY patterned samples is skipped -- it's
-            # more likely a small-in-this-sample fragment of a patterned
-            # team than genuine referee crops (a patterned team's own
-            # smallest subset, not a real singleton referee).
+            # bootstrap sample -- population size alone can't say *which*
+            # cluster is the referee though (a real team's own color
+            # outlier can just as easily be the smallest cluster -- see the
+            # class docstring's Chelsea-Burnley/Arsenal-Anderlecht
+            # evidence). Only the single smallest-population cluster is
+            # ever considered as a referee candidate (falling through to
+            # the next-smallest ONLY if the smallest looks patterned --
+            # a patterned team's own small fragment, not a real referee --
+            # never for any other reason). A first real bug found and
+            # fixed here (2026-07-20): testing progressively LARGER
+            # clusters as fallback referee candidates once the true
+            # smallest cluster fails on other grounds is unsound -- on
+            # Chelsea-Burnley, once the real 1-person outlier correctly
+            # failed the distinctiveness check below, an earlier version
+            # of this loop went on to test the 3-person cluster (i.e. one
+            # of the two real TEAMS) as a referee candidate instead, and
+            # accepted it, because that team's distance to the *outlier*
+            # (not to the other team) exceeded the ratio -- the outlier
+            # being an unrepresentative near-neighbor of one team is not
+            # evidence the other team is a referee. A real team should
+            # never be tested as a referee candidate at all. The accepted
+            # candidate must ALSO clear color distinctiveness -- distance
+            # to the nearer of the other two clusters must be at least
+            # REFEREE_MIN_DISTINCTIVENESS_RATIO times those other two
+            # clusters' own mutual distance, since a real referee kit is
+            # chosen specifically to not resemble either team's, while a
+            # same-team outlier sits closer to both team clusters than
+            # they sit to each other.
             by_size = sorted(range(3), key=lambda k: counts[k])
             referee_cluster = None
             for k in by_size:
                 cluster_patterned_frac = trusted_patterned[labels_trusted == k].mean() if counts[k] else 1.0
-                if cluster_patterned_frac < 0.5:
+                if cluster_patterned_frac >= 0.5:
+                    continue  # likely a patterned team's own small fragment -- try the next-smallest cluster
+                other = [j for j in range(3) if j != k]
+                d_other = float(np.linalg.norm(centroids_trusted[other[0]] - centroids_trusted[other[1]]))
+                d_cand = min(
+                    float(np.linalg.norm(centroids_trusted[k] - centroids_trusted[other[0]])),
+                    float(np.linalg.norm(centroids_trusted[k] - centroids_trusted[other[1]])),
+                )
+                if (
+                    d_other >= self.MIN_TEAM_SEPARATION_FOR_REFEREE_CHECK
+                    and d_cand / d_other >= self.REFEREE_MIN_DISTINCTIVENESS_RATIO
+                ):
                     referee_cluster = k
-                    break
-            if referee_cluster is None:
-                referee_cluster = by_size[0]  # rare: every cluster looks patterned -- fall back rather than never bootstrap
-            team_clusters = [k for k in range(3) if k != referee_cluster]
-            self.centroids = np.array([
-                trusted[labels_trusted == team_clusters[0]].mean(axis=0),
-                trusted[labels_trusted == team_clusters[1]].mean(axis=0),
-                trusted[labels_trusted == referee_cluster].mean(axis=0),
-            ])
+                break  # stop after the first non-patterned candidate either way -- never test a larger cluster
+            if referee_cluster is not None:
+                team_clusters = [k for k in range(3) if k != referee_cluster]
+                self.team_centroids = np.array([centroids_trusted[team_clusters[0]], centroids_trusted[team_clusters[1]]])
+                self.referee_centroid = centroids_trusted[referee_cluster]
+            else:
+                # No cluster confidently reads as a real referee this frame
+                # (the common case when the referee isn't even in the
+                # bootstrap frame) -- bootstrap team_a/team_b from the two
+                # LARGER of the 3 k=3 clusters directly (already computed
+                # above), deliberately EXCLUDING the smallest/outlier
+                # cluster's sample(s) from team bootstrap entirely, rather
+                # than re-clustering everyone with a fresh k=2 fit. This
+                # matters: a fresh k=2 fit would be forced to fold the
+                # ambiguous outlier into one of only two clusters, which
+                # was confirmed to reintroduce this exact bug one level
+                # removed -- the contaminated resulting centroid then made
+                # OTHER genuine same-team samples look spuriously
+                # "distinct" against it later. Treating the ambiguous
+                # sample as simply uncertain (in neither team nor referee)
+                # for this one bootstrap frame is consistent with this
+                # class's existing abstain-rather-than-guess philosophy.
+                # Referee detection is retried on later frames below,
+                # using this clean, uncontaminated team baseline.
+                by_size_desc = list(reversed(by_size))
+                self.team_centroids = np.array([centroids_trusted[by_size_desc[0]], centroids_trusted[by_size_desc[1]]])
 
-        # Re-derived from the (possibly just-bootstrapped) centroids either
-        # way, so occluded/bootstrap samples get a distance-based label/None
+        if self.referee_centroid is None:
+            # Retry referee identification on every frame until some frame
+            # naturally contains a confidently color-distinct sample (or
+            # never does for the whole clip -- an honest lack of any
+            # `referee` label is preferred over a permanent wrong guess).
+            trust_mask = ~occluded & ~patterned_arr
+            d_teams = float(np.linalg.norm(self.team_centroids[0] - self.team_centroids[1]))
+            if np.any(trust_mask) and d_teams >= self.MIN_TEAM_SEPARATION_FOR_DEFERRED_CHECK:
+                cand_x = x[trust_mask]
+                d_a = np.linalg.norm(cand_x - self.team_centroids[0], axis=1)
+                d_b = np.linalg.norm(cand_x - self.team_centroids[1], axis=1)
+                nearer = np.minimum(d_a, d_b)
+                is_referee_like = nearer >= self.REFEREE_MIN_DISTINCTIVENESS_RATIO * d_teams
+                if np.any(is_referee_like):
+                    self.referee_centroid = cand_x[is_referee_like].mean(axis=0)
+
+        centroids = (
+            np.vstack([self.team_centroids, self.referee_centroid[None, :]])
+            if self.referee_centroid is not None else self.team_centroids
+        )
+        n_clusters = centroids.shape[0]
+
+        # Re-derived from the (possibly just-updated) centroids either way,
+        # so occluded/bootstrap samples get a distance-based label/None
         # consistently with every later call, not a first-frame special case.
-        dists = np.linalg.norm(x[:, None, :] - self.centroids[None, :, :], axis=2)
+        dists = np.linalg.norm(x[:, None, :] - centroids[None, :, :], axis=2)
         d_sorted = np.sort(dists, axis=1)
         confident = d_sorted[:, 1] >= self.min_separation_ratio * np.maximum(d_sorted[:, 0], 1e-6)
         trust_sample = confident & ~occluded
         nearest = dists.argmin(axis=1)
 
-        # Hard veto: a patterned sample nearest to the referee centroid is
-        # reassigned to whichever TEAM centroid (0/1) is actually closer --
-        # it must never be allowed to read as referee, per this function's
-        # own docstring.
-        vetoed = patterned_arr & (nearest == 2)
-        if np.any(vetoed):
-            nearest[vetoed] = dists[vetoed][:, :2].argmin(axis=1)
+        if n_clusters == 3:
+            # Hard veto: a patterned sample nearest to the referee centroid
+            # is reassigned to whichever TEAM centroid (0/1) is actually
+            # closer -- it must never be allowed to read as referee, per
+            # this function's own docstring.
+            vetoed = patterned_arr & (nearest == 2)
+            if np.any(vetoed):
+                nearest[vetoed] = dists[vetoed][:, :2].argmin(axis=1)
 
-        for k in range(3):
+        for k in range(n_clusters):
             assigned = x[trust_sample & (nearest == k)]
             if len(assigned):
-                self.centroids[k] = (1 - self.ema_alpha) * self.centroids[k] + self.ema_alpha * assigned.mean(axis=0)
+                centroids[k] = (1 - self.ema_alpha) * centroids[k] + self.ema_alpha * assigned.mean(axis=0)
+        self.team_centroids = centroids[:2]
+        if n_clusters == 3:
+            self.referee_centroid = centroids[2]
 
         return [int(nearest[i]) if trust_sample[i] else None for i in range(n)]
