@@ -47,3 +47,14 @@ class PitchCalibrator:
         vec = self.h @ np.array([px, py, 1.0])
         vec = vec / vec[2]  # perspective division; a no-op for the affine-only
         return float(vec[0]), float(vec[1])  # matrices above, whose bottom row is [0,0,1]
+
+    def pitch_to_pixel(self, x_m: float, y_m: float) -> tuple[float, float]:
+        """Inverse of `pixel_to_pitch` -- given a real-world pitch point,
+        returns where it falls in this calibrator's own frame. Added
+        2026-07-21 for `render_demo.py`'s pitch-line overlay (drawing
+        known real pitch markings back onto the video using the same
+        homography already fit for detections), rather than a new
+        projection mechanism -- reuses this class's own `self.h`."""
+        vec = np.linalg.inv(self.h) @ np.array([x_m, y_m, 1.0])
+        vec = vec / vec[2]
+        return float(vec[0]), float(vec[1])

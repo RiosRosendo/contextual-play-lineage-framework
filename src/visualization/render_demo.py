@@ -26,6 +26,7 @@ import pandas as pd
 
 from src.assistant.explain import assess_foul_candidate
 from src.perception import scene_cut
+from src.perception.pipeline import _calibrate_shot_own
 from src.perception.synthetic_clip import (
     BALL_COLOR_BGR, FPS, FRAME_H, FRAME_W, PX_PER_M, REF_COLOR_BGR,
     TEAM_A_COLOR_BGR, TEAM_B_COLOR_BGR, pitch_background,
@@ -89,6 +90,93 @@ _EVENT_COLOR = {
 HEATMAP_BINS = (21, 14)
 HEATMAP_INSET_W, HEATMAP_INSET_H = 210, 140
 PITCH_LENGTH_M, PITCH_WIDTH_M = 105.0, 68.0
+
+# Live tactical-radar inset (2026-07-21): current frame's calibrated
+# positions plotted on the same flat pitch diagram synthetic_clip.py's
+# bird's-eye renderer already draws, at the same PX_PER_M scale -- reuses
+# that background image and the pitch-coordinate system Layer 1 already
+# projects every row into, rather than a new projection.
+RADAR_INSET_W, RADAR_INSET_H = 210, 140
+
+# Pitch-line overlay (2026-07-21, requested after Rosendo saw a Roboflow
+# tutorial's "virtual field overlay"): standard 105x68m IFAB pitch
+# markings, in the same world-coordinate system pitch_calibration_cv.py
+# already calibrates against. Drawn by projecting these known real points
+# back into pixel space via PitchCalibrator.pitch_to_pixel -- the inverse
+# of the same homography every detection's (x, y) already comes from, not
+# a new calibration mechanism.
+_PENALTY_BOX_DEPTH_M, _PENALTY_BOX_Y0, _PENALTY_BOX_Y1 = 16.5, 13.84, 54.16
+_SIX_YARD_DEPTH_M, _SIX_YARD_Y0, _SIX_YARD_Y1 = 5.5, 24.84, 43.16
+_CENTER_CIRCLE_RADIUS_M = 9.15
+
+
+def _pitch_line_polylines() -> list[np.ndarray]:
+    L, W = PITCH_LENGTH_M, PITCH_WIDTH_M
+    polylines = [
+        np.array([(0, 0), (L, 0), (L, W), (0, W), (0, 0)]),
+        np.array([(L / 2, 0), (L / 2, W)]),
+        np.array([(0, _PENALTY_BOX_Y0), (_PENALTY_BOX_DEPTH_M, _PENALTY_BOX_Y0),
+                   (_PENALTY_BOX_DEPTH_M, _PENALTY_BOX_Y1), (0, _PENALTY_BOX_Y1)]),
+        np.array([(L, _PENALTY_BOX_Y0), (L - _PENALTY_BOX_DEPTH_M, _PENALTY_BOX_Y0),
+                   (L - _PENALTY_BOX_DEPTH_M, _PENALTY_BOX_Y1), (L, _PENALTY_BOX_Y1)]),
+        np.array([(0, _SIX_YARD_Y0), (_SIX_YARD_DEPTH_M, _SIX_YARD_Y0),
+                   (_SIX_YARD_DEPTH_M, _SIX_YARD_Y1), (0, _SIX_YARD_Y1)]),
+        np.array([(L, _SIX_YARD_Y0), (L - _SIX_YARD_DEPTH_M, _SIX_YARD_Y0),
+                   (L - _SIX_YARD_DEPTH_M, _SIX_YARD_Y1), (L, _SIX_YARD_Y1)]),
+    ]
+    angles = np.linspace(0, 2 * np.pi, 32)
+    polylines.append(np.stack([
+        L / 2 + _CENTER_CIRCLE_RADIUS_M * np.cos(angles),
+        W / 2 + _CENTER_CIRCLE_RADIUS_M * np.sin(angles),
+    ], axis=1))
+    return polylines
+
+
+_PITCH_LINE_WORLD_POLYLINES = _pitch_line_polylines()
+# A projected point this many frame-diagonals outside the visible frame is
+# from a shot whose calibration, even though it nominally succeeded (see
+# calib_source == "own"), is too poorly conditioned far from its fit
+# region to draw sensibly (a documented limitation, see
+# pitch_calibration_cv.py) -- clipped rather than left to overflow
+# cv2.polylines' int32 coordinates.
+_OVERLAY_CLIP_MARGIN_DIAGONALS = 3.0
+
+
+def _draw_pitch_overlay(frame: np.ndarray, calibrator, frame_w: int, frame_h: int) -> None:
+    diag = (frame_w ** 2 + frame_h ** 2) ** 0.5
+    margin = _OVERLAY_CLIP_MARGIN_DIAGONALS * diag
+    overlay = frame.copy()
+    for poly_world in _PITCH_LINE_WORLD_POLYLINES:
+        pts = [calibrator.pitch_to_pixel(x, y) for x, y in poly_world]
+        if any(abs(px) > margin or abs(py) > margin for px, py in pts):
+            continue  # this line's own points are too far outside a sane range to trust
+        pts_arr = np.array(pts, dtype=np.int32)
+        is_closed = tuple(poly_world[0]) == tuple(poly_world[-1]) or len(poly_world) > 4
+        cv2.polylines(overlay, [pts_arr], isClosed=is_closed, color=(255, 255, 255),
+                       thickness=2, lineType=cv2.LINE_AA)
+    cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, dst=frame)
+
+
+def _tactical_radar_inset(rows: pd.DataFrame) -> np.ndarray:
+    """Current frame's calibrated player/ball positions on the flat pitch
+    diagram -- a live snapshot, unlike `_heatmap_inset`'s accumulated
+    density. Reuses `pitch_background()` and PX_PER_M directly (see the
+    module-level comment above `RADAR_INSET_W`)."""
+    radar = pitch_background().copy()
+    if rows is not None:
+        for _, row in rows.iterrows():
+            if row["cls"] not in ("player", "referee", "ball") or pd.isna(row["x"]) or pd.isna(row["y"]):
+                continue
+            px, py = int(row["x"] * PX_PER_M), int(row["y"] * PX_PER_M)
+            if not (0 <= px < radar.shape[1] and 0 <= py < radar.shape[0]):
+                continue
+            radius = BALL_RADIUS_PX if row["cls"] == "ball" else PLAYER_RADIUS_PX
+            cv2.circle(radar, (px, py), radius, _color_for(row["cls"], row["team"]), -1)
+    radar = cv2.resize(radar, (RADAR_INSET_W, RADAR_INSET_H), interpolation=cv2.INTER_AREA)
+    cv2.rectangle(radar, (0, 0), (RADAR_INSET_W - 1, RADAR_INSET_H - 1), (255, 255, 255), 1)
+    cv2.putText(radar, "live positions", (4, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.35,
+                (255, 255, 255), 1, cv2.LINE_AA)
+    return radar
 
 
 def _print_render_progress(frame_idx: int, n_frames: int) -> None:
@@ -214,6 +302,27 @@ def _render_real_overlay(video_path: str, out_path: Path, result: dict | None = 
     shots = scene_cut.split_into_shots(video_path)
     cut_frames = {start for start, _ in shots[1:]}  # shot 0's start (frame 0) isn't a "cut"
 
+    # Pitch-line overlay (2026-07-21): each shot's OWN calibration attempt
+    # is recomputed here (cheap -- one frame's keypoint detection per shot,
+    # not a second full pipeline pass) purely to decide whether to draw --
+    # mirrors this function's existing pattern of independently recomputing
+    # `scene_cut.split_into_shots` rather than threading it through
+    # `result`. Only drawn when a shot's OWN calibration succeeds
+    # (matches `calib_source == "own"` in `df`) -- a shot relying on
+    # `fallback_prev_shot` or the flat `placeholder` gets no overlay at
+    # all, since either would draw a confidently wrong pitch, the same
+    # failure mode the calibration plausibility gate already guards
+    # against for metrics.
+    shot_calibrators = []
+    for start_frame, end_frame in shots:
+        shot_calibrators.append((start_frame, end_frame, _calibrate_shot_own(video_path, start_frame)))
+
+    def _calibrator_for_frame(frame_idx: int):
+        for start_frame, end_frame, calibrator in shot_calibrators:
+            if start_frame <= frame_idx < end_frame:
+                return calibrator
+        return None
+
     team_bins = {team: np.zeros(HEATMAP_BINS) for team in df["team"].dropna().unique()}
 
     cap = cv2.VideoCapture(video_path)
@@ -238,6 +347,10 @@ def _render_real_overlay(video_path: str, out_path: Path, result: dict | None = 
 
         if frame_idx in cut_frames:
             last_cut_frame = frame_idx
+
+        shot_calibrator = _calibrator_for_frame(frame_idx)
+        if shot_calibrator is not None:
+            _draw_pitch_overlay(frame, shot_calibrator, frame_w, frame_h)
 
         rows = by_frame.get(frame_idx)
         if rows is not None:
@@ -271,6 +384,12 @@ def _render_real_overlay(video_path: str, out_path: Path, result: dict | None = 
         inset = _heatmap_inset(team_bins)
         ih, iw = inset.shape[:2]
         frame[10:10 + ih, frame_w - 10 - iw:frame_w - 10] = inset
+
+        # Live tactical-radar inset (2026-07-21) -- bottom-left, so it
+        # doesn't collide with the accumulated-heatmap inset above.
+        radar = _tactical_radar_inset(rows)
+        rh, rw = radar.shape[:2]
+        frame[frame_h - 10 - rh:frame_h - 10, 10:10 + rw] = radar
 
         writer.write(frame)
         _print_render_progress(frame_idx, n_frames)
