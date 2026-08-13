@@ -25,8 +25,7 @@ import numpy as np
 import pandas as pd
 
 from src.assistant.explain import assess_foul_candidate
-from src.perception import scene_cut
-from src.perception.pipeline import _calibrate_shot_own
+from src.perception import pitch_keypoint_calibration, scene_cut
 from src.perception.synthetic_clip import (
     BALL_COLOR_BGR, FPS, FRAME_H, FRAME_W, PX_PER_M, REF_COLOR_BGR,
     TEAM_A_COLOR_BGR, TEAM_B_COLOR_BGR, pitch_background,
@@ -99,61 +98,33 @@ PITCH_LENGTH_M, PITCH_WIDTH_M = 105.0, 68.0
 RADAR_INSET_W, RADAR_INSET_H = 210, 140
 
 # Pitch-line overlay (2026-07-21, requested after Rosendo saw a Roboflow
-# tutorial's "virtual field overlay"): standard 105x68m IFAB pitch
-# markings, in the same world-coordinate system pitch_calibration_cv.py
-# already calibrates against. Drawn by projecting these known real points
-# back into pixel space via PitchCalibrator.pitch_to_pixel -- the inverse
-# of the same homography every detection's (x, y) already comes from, not
-# a new calibration mechanism.
-_PENALTY_BOX_DEPTH_M, _PENALTY_BOX_Y0, _PENALTY_BOX_Y1 = 16.5, 13.84, 54.16
-_SIX_YARD_DEPTH_M, _SIX_YARD_Y0, _SIX_YARD_Y1 = 5.5, 24.84, 43.16
-_CENTER_CIRCLE_RADIUS_M = 9.15
-
-
-def _pitch_line_polylines() -> list[np.ndarray]:
-    L, W = PITCH_LENGTH_M, PITCH_WIDTH_M
-    polylines = [
-        np.array([(0, 0), (L, 0), (L, W), (0, W), (0, 0)]),
-        np.array([(L / 2, 0), (L / 2, W)]),
-        np.array([(0, _PENALTY_BOX_Y0), (_PENALTY_BOX_DEPTH_M, _PENALTY_BOX_Y0),
-                   (_PENALTY_BOX_DEPTH_M, _PENALTY_BOX_Y1), (0, _PENALTY_BOX_Y1)]),
-        np.array([(L, _PENALTY_BOX_Y0), (L - _PENALTY_BOX_DEPTH_M, _PENALTY_BOX_Y0),
-                   (L - _PENALTY_BOX_DEPTH_M, _PENALTY_BOX_Y1), (L, _PENALTY_BOX_Y1)]),
-        np.array([(0, _SIX_YARD_Y0), (_SIX_YARD_DEPTH_M, _SIX_YARD_Y0),
-                   (_SIX_YARD_DEPTH_M, _SIX_YARD_Y1), (0, _SIX_YARD_Y1)]),
-        np.array([(L, _SIX_YARD_Y0), (L - _SIX_YARD_DEPTH_M, _SIX_YARD_Y0),
-                   (L - _SIX_YARD_DEPTH_M, _SIX_YARD_Y1), (L, _SIX_YARD_Y1)]),
-    ]
-    angles = np.linspace(0, 2 * np.pi, 32)
-    polylines.append(np.stack([
-        L / 2 + _CENTER_CIRCLE_RADIUS_M * np.cos(angles),
-        W / 2 + _CENTER_CIRCLE_RADIUS_M * np.sin(angles),
-    ], axis=1))
-    return polylines
-
-
-_PITCH_LINE_WORLD_POLYLINES = _pitch_line_polylines()
-# A projected point this many frame-diagonals outside the visible frame is
-# from a shot whose calibration, even though it nominally succeeded (see
-# calib_source == "own"), is too poorly conditioned far from its fit
-# region to draw sensibly (a documented limitation, see
-# pitch_calibration_cv.py) -- clipped rather than left to overflow
-# cv2.polylines' int32 coordinates.
-_OVERLAY_CLIP_MARGIN_DIAGONALS = 3.0
-
-
-def _draw_pitch_overlay(frame: np.ndarray, calibrator, frame_w: int, frame_h: int) -> None:
-    diag = (frame_w ** 2 + frame_h ** 2) ** 0.5
-    margin = _OVERLAY_CLIP_MARGIN_DIAGONALS * diag
+# tutorial's "virtual field overlay"; recalibrated to a per-frame keypoint
+# model 2026-08-11 -- see pitch_keypoint_calibration.py's module docstring
+# for why: a single per-shot homography (the original version of this
+# overlay, and pitch_calibration_cv.py's own approach) visibly drifted off
+# the real pitch within ~15s on a long, continuously-panning broadcast
+# shot, confirmed with direct frame evidence on final_mundial's
+# jugada_clip.mp4. Recomputing from each frame's own detected landmarks
+# tracks camera movement instead of assuming a stale fit still applies.
+def _draw_pitch_overlay(frame: np.ndarray, transformer) -> None:
+    """`transformer` is a `sports.common.view.ViewTransformer` from
+    `pitch_keypoint_calibration.calibrate_frame` (world cm -> this
+    frame's pixels) -- draws using the sports package's own pitch layout
+    (`pitch_keypoint_calibration.pitch_config()`), not this project's own
+    105x68m convention, since it must match whatever real-world layout
+    the calibrating keypoints themselves were fit against."""
+    cfg = pitch_keypoint_calibration.pitch_config()
+    world_pts = np.array(cfg.vertices, dtype=np.float32)
     overlay = frame.copy()
-    for poly_world in _PITCH_LINE_WORLD_POLYLINES:
-        pts = [calibrator.pitch_to_pixel(x, y) for x, y in poly_world]
-        if any(abs(px) > margin or abs(py) > margin for px, py in pts):
-            continue  # this line's own points are too far outside a sane range to trust
-        pts_arr = np.array(pts, dtype=np.int32)
-        is_closed = tuple(poly_world[0]) == tuple(poly_world[-1]) or len(poly_world) > 4
-        cv2.polylines(overlay, [pts_arr], isClosed=is_closed, color=(255, 255, 255),
-                       thickness=2, lineType=cv2.LINE_AA)
+    for a, b in cfg.edges:
+        pts = transformer.transform_points(np.array([world_pts[a - 1], world_pts[b - 1]], dtype=np.float32))
+        cv2.line(overlay, tuple(pts[0].astype(int)), tuple(pts[1].astype(int)),
+                  (255, 255, 255), 2, cv2.LINE_AA)
+    angles = np.linspace(0, 2 * np.pi, 48)
+    cx, cy, r = cfg.length / 2, cfg.width / 2, cfg.centre_circle_radius
+    circle_world = np.stack([cx + r * np.cos(angles), cy + r * np.sin(angles)], axis=1).astype(np.float32)
+    circle_px = transformer.transform_points(circle_world)
+    cv2.polylines(overlay, [circle_px.astype(np.int32)], True, (255, 255, 255), 2, cv2.LINE_AA)
     cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, dst=frame)
 
 
@@ -302,27 +273,6 @@ def _render_real_overlay(video_path: str, out_path: Path, result: dict | None = 
     shots = scene_cut.split_into_shots(video_path)
     cut_frames = {start for start, _ in shots[1:]}  # shot 0's start (frame 0) isn't a "cut"
 
-    # Pitch-line overlay (2026-07-21): each shot's OWN calibration attempt
-    # is recomputed here (cheap -- one frame's keypoint detection per shot,
-    # not a second full pipeline pass) purely to decide whether to draw --
-    # mirrors this function's existing pattern of independently recomputing
-    # `scene_cut.split_into_shots` rather than threading it through
-    # `result`. Only drawn when a shot's OWN calibration succeeds
-    # (matches `calib_source == "own"` in `df`) -- a shot relying on
-    # `fallback_prev_shot` or the flat `placeholder` gets no overlay at
-    # all, since either would draw a confidently wrong pitch, the same
-    # failure mode the calibration plausibility gate already guards
-    # against for metrics.
-    shot_calibrators = []
-    for start_frame, end_frame in shots:
-        shot_calibrators.append((start_frame, end_frame, _calibrate_shot_own(video_path, start_frame)))
-
-    def _calibrator_for_frame(frame_idx: int):
-        for start_frame, end_frame, calibrator in shot_calibrators:
-            if start_frame <= frame_idx < end_frame:
-                return calibrator
-        return None
-
     team_bins = {team: np.zeros(HEATMAP_BINS) for team in df["team"].dropna().unique()}
 
     cap = cv2.VideoCapture(video_path)
@@ -348,9 +298,16 @@ def _render_real_overlay(video_path: str, out_path: Path, result: dict | None = 
         if frame_idx in cut_frames:
             last_cut_frame = frame_idx
 
-        shot_calibrator = _calibrator_for_frame(frame_idx)
-        if shot_calibrator is not None:
-            _draw_pitch_overlay(frame, shot_calibrator, frame_w, frame_h)
+        # Pitch-line overlay (2026-07-21, recalibrated per-frame 2026-08-11 --
+        # see pitch_keypoint_calibration.py): recomputed fresh from THIS
+        # frame's own detected pitch landmarks, not reused from the shot's
+        # first frame, so it tracks camera movement within a shot instead
+        # of drifting. Skipped entirely (no overlay drawn) when this frame
+        # doesn't yield enough confident keypoints for a homography,
+        # rather than drawing a confidently wrong pitch.
+        transformer = pitch_keypoint_calibration.calibrate_frame(frame)
+        if transformer is not None:
+            _draw_pitch_overlay(frame, transformer)
 
         rows = by_frame.get(frame_idx)
         if rows is not None:
