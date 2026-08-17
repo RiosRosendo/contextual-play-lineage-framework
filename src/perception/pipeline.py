@@ -323,7 +323,16 @@ def _run_yolo_backend_shot(video_path: str, calibrator: PitchCalibrator, fps: fl
             cx, cy = (t["box"][0] + t["box"][2]) / 2, (t["box"][1] + t["box"][3]) / 2
             x_m, y_m = calibrator.pixel_to_pitch(cx, cy)
             cls = {"person": "player", "referee": "referee", "ball": "ball"}.get(t["cls"], t["cls"])
-            if cls == "player":
+            # 2026-08-12: this used to only run for cls == "player" -- a real,
+            # structural gap (see PROGRESS.md's 2026-08-11 final_mundial entry)
+            # that let a crowd/photographer detection TeamColorAnchor's color
+            # logic classified "referee" bypass this check entirely, since it
+            # never even reached the branch below. Confirmed directly on that
+            # clip: a fan in the stands (track 313, t~25.9s) calibrated to
+            # y=-19 to -22.8 (nowhere near the real 0-68m pitch width) but
+            # was never excluded, purely because it was labeled "referee"
+            # first. Both classes now run the same position check.
+            if cls in ("player", "referee"):
                 if calib_source != "own":
                     # The pitch-boundary check below depends entirely on
                     # the calibrated (x_m, y_m) being meaningful -- on a
@@ -337,15 +346,25 @@ def _run_yolo_backend_shot(video_path: str, calibrator: PitchCalibrator, fps: fl
                     # padded pitch rectangle). Mark honestly as low
                     # confidence instead of trusting a geometric check
                     # built on positions we already know aren't real here.
-                    cls = "low_confidence"
+                    # Referee stays "referee", deliberately NOT "low_confidence"
+                    # (2026-08-12): "low_confidence" rows are treated as
+                    # candidate players by pose_signals.py/review_windows.py's
+                    # contact-detection logic -- correct for a player whose
+                    # calibrated position just can't be trusted, but wrong for
+                    # something already identified as the referee, which must
+                    # stay excluded from player-only signals by construction
+                    # (see the referee-assignment comment above) regardless of
+                    # calibration quality.
+                    if cls == "player":
+                        cls = "low_confidence"
                 elif not (
                     -SIDELINE_MARGIN_M <= x_m <= pitch_calibration_cv.PITCH_LENGTH_M + SIDELINE_MARGIN_M
                     and -SIDELINE_MARGIN_M <= y_m <= pitch_calibration_cv.PITCH_WIDTH_M + SIDELINE_MARGIN_M
                 ):
                     # Calibrated position falls well outside the real pitch --
-                    # not a player (see SIDELINE_MARGIN_M above). Reclassified
-                    # rather than dropped, so this is auditable the same way
-                    # calib_source already is.
+                    # not a player or referee at all (see SIDELINE_MARGIN_M
+                    # above). Reclassified rather than dropped, so this is
+                    # auditable the same way calib_source already is.
                     cls = "non_player"
             row = {
                 "frame": frame_idx, "time_s": frame_idx / fps, "track_id": t["track_id"] + track_id_offset,
