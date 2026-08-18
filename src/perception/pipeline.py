@@ -119,7 +119,40 @@ def _reclassify_goalkeepers(df: pd.DataFrame) -> pd.DataFrame:
     column where it doesn't already exist, so those pre-set values survive;
     this function still runs its own positional check afterward for
     whatever that second detector didn't catch (e.g. close/zoomed frames
-    its scale gate excluded it from)."""
+    its scale gate excluded it from).
+
+    2026-08-17: also REVOKES `is_goalkeeper` from any track that fails
+    this same positional check, regardless of which mechanism set it --
+    a real, disclosed gap found on Arsenal-Anderlecht (see PROGRESS.md):
+    Roboflow's own "goalkeeper" class confidently (and wrongly) tags
+    ordinary, centrally-positioned field players, and until now nothing
+    ever re-checked that tag against position at all, unlike the
+    referee-promotion path above which always required it. Two other
+    signals were tested directly first and found NOT to discriminate this
+    class of false positive: the appearance-based player/non-player
+    classifier (`player_classifier.py`) reads a confirmed non-player
+    (a pitch-side photographer, final_mundial track 315) as player-like in
+    8/8 sampled crops, and per-track speed statistics didn't cleanly
+    separate a confirmed real goalkeeper from that same confirmed
+    non-player. Position, by contrast, is exactly what the referee-
+    promotion path above was already built and validated against real
+    goalkeeper tracks for -- reused here unchanged (same constants, same
+    calib_source=="own"-only reliability requirement), not a new,
+    unvalidated threshold. A track with fewer than GK_MIN_ROWS reliable
+    rows is revoked too (not given the benefit of the doubt): the
+    promotion path above requires that same minimum to ever assert
+    is_goalkeeper=True in the first place, so a tag that can't clear the
+    same bar under revocation shouldn't have been trusted either.
+
+    Confirmed directly this does NOT address the final_mundial photographer
+    case (track 315) -- checked, not assumed: his own calibrated position
+    DOES satisfy this exact zone check (x within 25m of a goal line for
+    100% of his reliable rows), the same way a real goalkeeper's would, so
+    he survives this revocation pass unchanged. That case remains open --
+    see PROGRESS.md for the full record of what was tried (position,
+    appearance, speed) and why none of them discriminate a goal-line
+    photographer from a real goalkeeper positionally confined the same
+    way."""
     if "is_goalkeeper" not in df.columns:
         df["is_goalkeeper"] = False
     if "cls" not in df.columns or df.empty:
@@ -137,6 +170,16 @@ def _reclassify_goalkeepers(df: pd.DataFrame) -> pd.DataFrame:
         df.loc[mask, "cls"] = "player"
         df.loc[mask, "team"] = team
         df.loc[mask, "is_goalkeeper"] = True
+
+    for track_id in df.loc[df["is_goalkeeper"], "track_id"].unique():
+        mask = df["track_id"] == track_id
+        reliable = df.loc[mask & (df["calib_source"] == "own")]
+        if len(reliable) < GK_MIN_ROWS:
+            df.loc[mask, "is_goalkeeper"] = False
+            continue
+        in_zone = (reliable["x"] <= GK_ZONE_M) | (reliable["x"] >= pitch_length - GK_ZONE_M)
+        if in_zone.mean() < GK_ZONE_MIN_FRACTION:
+            df.loc[mask, "is_goalkeeper"] = False
     return df
 
 

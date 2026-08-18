@@ -352,6 +352,14 @@ def _render_real_overlay(video_path: str, out_path: Path, result: dict | None = 
                 if cls_label is not None:
                     if pd.notna(row["team"]):
                         cls_label += f" {row['team']}"
+                    # (GK) suffix (2026-08-17): `is_goalkeeper` was tracked
+                    # as data since 2026-07-20 but never actually rendered
+                    # anywhere -- added so the goalkeeper-revocation fix
+                    # (pipeline.py's _reclassify_goalkeepers) has a visible
+                    # effect a preview video can actually show, not just a
+                    # row-count change in the underlying data.
+                    if row.get("is_goalkeeper"):
+                        cls_label += " (GK)"
                     cv2.putText(frame, cls_label, (x1, max(0, y1 - 18)),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
                 if row["cls"] == "player":
