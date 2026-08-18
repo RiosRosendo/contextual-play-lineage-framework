@@ -106,25 +106,55 @@ RADAR_INSET_W, RADAR_INSET_H = 210, 140
 # shot, confirmed with direct frame evidence on final_mundial's
 # jugada_clip.mp4. Recomputing from each frame's own detected landmarks
 # tracks camera movement instead of assuming a stale fit still applies.
-def _draw_pitch_overlay(frame: np.ndarray, transformer) -> None:
+#
+# Edge-support filtering (2026-08-17): a further regression found from
+# direct video review -- a fit can pass calibrate_frame's own plausibility
+# gate (checks the fit AS A WHOLE) while still extrapolating individual
+# lines tens of meters past anything the matched keypoints actually
+# support, producing a visibly wrong line even though the fit itself is
+# numerically fine. See pitch_keypoint_calibration.EDGE_SUPPORT_RADIUS_CM's
+# comment for the frame evidence. Fixed by skipping any edge/circle-arc
+# segment with no matched keypoint within that radius, rather than
+# drawing the whole named pitch layout unconditionally every time.
+def _draw_pitch_overlay(frame: np.ndarray, transformer, matched_world_pts: np.ndarray) -> None:
     """`transformer` is a `sports.common.view.ViewTransformer` from
     `pitch_keypoint_calibration.calibrate_frame` (world cm -> this
     frame's pixels) -- draws using the sports package's own pitch layout
     (`pitch_keypoint_calibration.pitch_config()`), not this project's own
     105x68m convention, since it must match whatever real-world layout
-    the calibrating keypoints themselves were fit against."""
+    the calibrating keypoints themselves were fit against. `matched_world_pts`
+    is this same frame's matched-keypoint world positions (also from
+    `calibrate_frame`) -- used to skip any line segment too far from real
+    support to trust (see EDGE_SUPPORT_RADIUS_CM's comment)."""
     cfg = pitch_keypoint_calibration.pitch_config()
     world_pts = np.array(cfg.vertices, dtype=np.float32)
+    vertex_trusted = pitch_keypoint_calibration.vertices_near_support(matched_world_pts)
     overlay = frame.copy()
     for a, b in cfg.edges:
+        if not (vertex_trusted[a - 1] and vertex_trusted[b - 1]):
+            continue
         pts = transformer.transform_points(np.array([world_pts[a - 1], world_pts[b - 1]], dtype=np.float32))
         cv2.line(overlay, tuple(pts[0].astype(int)), tuple(pts[1].astype(int)),
                   (255, 255, 255), 2, cv2.LINE_AA)
     angles = np.linspace(0, 2 * np.pi, 48)
     cx, cy, r = cfg.length / 2, cfg.width / 2, cfg.centre_circle_radius
     circle_world = np.stack([cx + r * np.cos(angles), cy + r * np.sin(angles)], axis=1).astype(np.float32)
-    circle_px = transformer.transform_points(circle_world)
-    cv2.polylines(overlay, [circle_px.astype(np.int32)], True, (255, 255, 255), 2, cv2.LINE_AA)
+    circle_trusted = pitch_keypoint_calibration.points_near_support(
+        circle_world.astype(np.float64), matched_world_pts,
+    )
+    if circle_trusted.any():
+        circle_px = transformer.transform_points(circle_world)
+        # Only draw the arc segments actually near support, not the whole
+        # circle just because one point on it qualifies -- consecutive
+        # trusted points are connected, gaps are skipped rather than
+        # bridged (bridging would redraw the same extrapolation problem
+        # this filter exists to avoid).
+        n = len(circle_px)
+        for i in range(n):
+            j = (i + 1) % n
+            if circle_trusted[i] and circle_trusted[j]:
+                cv2.line(overlay, tuple(circle_px[i].astype(int)), tuple(circle_px[j].astype(int)),
+                          (255, 255, 255), 2, cv2.LINE_AA)
     cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, dst=frame)
 
 
@@ -305,9 +335,10 @@ def _render_real_overlay(video_path: str, out_path: Path, result: dict | None = 
         # of drifting. Skipped entirely (no overlay drawn) when this frame
         # doesn't yield enough confident keypoints for a homography,
         # rather than drawing a confidently wrong pitch.
-        transformer = pitch_keypoint_calibration.calibrate_frame(frame)
-        if transformer is not None:
-            _draw_pitch_overlay(frame, transformer)
+        calibration = pitch_keypoint_calibration.calibrate_frame(frame)
+        if calibration is not None:
+            transformer, matched_world_pts = calibration
+            _draw_pitch_overlay(frame, transformer, matched_world_pts)
 
         rows = by_frame.get(frame_idx)
         if rows is not None:

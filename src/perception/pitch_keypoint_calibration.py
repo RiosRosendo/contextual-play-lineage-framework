@@ -178,10 +178,66 @@ def _is_plausible(src_px: np.ndarray, tgt_world: np.ndarray, frame_w: int, frame
     return True
 
 
+# Edge-support radius (2026-08-17): a real regression found from direct
+# video review, not assumed -- on a final_mundial frame (t=8s) with 8
+# confident keypoints, all clustered near one goal box (world x=0-2015cm),
+# the fit passed both plausibility checks above (LOO_max=0.043, well under
+# 0.08; cm/px=4.78, well under 10.0) and still produced a visibly wrong
+# overlay: the far box/touchline, whose nearest matched keypoint is
+# 80-100m away, got drawn via wild extrapolation, cutting a nonsense
+# diagonal line across empty grass, while the near-box lines (matching
+# the actual keypoints) were precisely correct. LOO and the cm/px check
+# both validate the FIT as a whole; neither says anything about how far
+# any individual drawn line is from a point the fit actually has support
+# near. Confirmed directly this isn't just a "draw less" tradeoff: a
+# genuinely wide, GOOD frame (final_mundial t=15, confirmed excellent by
+# direct visual inspection) has real matched keypoints at the halfway
+# line and the center circle's own edge (world x=6000cm), so those
+# regions stay eligible under a support-radius filter, while its own far
+# box/touchline (x=9985-12000cm, nothing matched anywhere near there
+# either) gets correctly excluded too -- previously drawn on luck/being
+# off-screen, not on any real support. 2000cm (20m, roughly a penalty
+# box's own depth) sits comfortably above the near-box edges' own
+# distances in the bad t=8 case (275-1008cm) and comfortably below the
+# next tier out (the halfway line at ~3988cm in that same bad frame).
+EDGE_SUPPORT_RADIUS_CM = 2000.0
+
+
+def points_near_support(query_world_pts: np.ndarray, matched_world_pts: np.ndarray) -> np.ndarray:
+    """Boolean mask, one entry per row of `query_world_pts` -- True for
+    any world point within EDGE_SUPPORT_RADIUS_CM of at least one of this
+    frame's own matched keypoints (`matched_world_pts`, as returned by
+    `calibrate_frame`). Generic over whatever points a caller wants
+    checked (named pitch vertices, arbitrary circle sample points, ...) --
+    see EDGE_SUPPORT_RADIUS_CM's comment for why extrapolating past it
+    isn't trustworthy even when the fit itself passes the plausibility
+    gate."""
+    dists = np.linalg.norm(
+        query_world_pts[:, None, :].astype(np.float64)
+        - matched_world_pts[None, :, :].astype(np.float64), axis=2
+    )
+    return dists.min(axis=1) <= EDGE_SUPPORT_RADIUS_CM
+
+
+def vertices_near_support(matched_world_pts: np.ndarray) -> np.ndarray:
+    """Boolean mask over `pitch_config().vertices` -- convenience wrapper
+    around `points_near_support` for the 32 named pitch vertices
+    specifically (what `render_demo.py`'s line-edge drawing uses).
+    Callers should only draw a line between two vertices that both pass
+    this check."""
+    cfg = pitch_config()
+    all_vertices = np.array(cfg.vertices, dtype=np.float64)
+    return points_near_support(all_vertices, matched_world_pts)
+
+
 def calibrate_frame(frame_bgr: np.ndarray):
-    """Returns a `sports.common.view.ViewTransformer` mapping this
-    module's world pitch coordinates (cm, see `pitch_config()`) to this
-    specific frame's pixel coordinates, or `None` if the model isn't
+    """Returns `(transformer, matched_world_pts)` -- `transformer` is a
+    `sports.common.view.ViewTransformer` mapping this module's world
+    pitch coordinates (cm, see `pitch_config()`) to this specific frame's
+    pixel coordinates; `matched_world_pts` is the set of real-world
+    positions this frame's own confident keypoints were matched to (see
+    `vertices_near_support`, which callers should use before drawing any
+    line far from them). Returns `None` (not a tuple) if the model isn't
     available, too few confident keypoints were found in this frame, or
     the resulting homography fails the plausibility gate (see
     MAX_LOO_RESIDUAL_FRAC's comment)."""
@@ -209,4 +265,4 @@ def calibrate_frame(frame_bgr: np.ndarray):
         transformer = ViewTransformer(source=tgt_world, target=src_px)
     except ValueError:
         return None
-    return transformer
+    return transformer, tgt_world
